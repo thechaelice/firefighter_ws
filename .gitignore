@@ -1,0 +1,28 @@
+# ROS 2 / colcon workspace outputs
+/build/
+/install/
+/log/
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+
+# CMake and native build artifacts
+CMakeFiles/
+CMakeCache.txt
+cmake_install.cmake
+Makefile
+*.o
+*.a
+*.so
+
+# Logs
+*.log
+
+# Editor and operating-system files
+.idea/
+.DS_Store
+Thumbs.db
