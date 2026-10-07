@@ -70,6 +70,13 @@ The robot is built with a dual-controller architecture:
 | **Thermal Flame Localization**| Thermal Camera + ML Model | ⏳ Planned | Infrared imaging and flame coordinate targeting |
 | **Fire Retardant Dispenser** | Actuator / Pump / Nozzle | ⏳ Planned | Automated fire suppression dispenser |
 
+### Upstream ROS 2 Packages
+
+The following packages are included in `src/`:
+
+* [`sllidar_ros2`](src/sllidar_ros2/) from [Slamtec/sllidar_ros2](https://github.com/Slamtec/sllidar_ros2)
+* [`rf2o_laser_odometry`](src/rf2o_laser_odometry/) from [MAPIRlab/rf2o_laser_odometry](https://github.com/MAPIRlab/rf2o_laser_odometry)
+
 ---
 
 ## Getting Started (ROS 2 Workspace)
