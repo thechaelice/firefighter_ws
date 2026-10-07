@@ -10,7 +10,9 @@ authors = [
 requires-python = ">=3.12"
 dependencies = [
     "adafruit-blinka>=9.2.0",
-    "adafruit-circuitpython-mlx90640>=1.3.9",
+    # Thermal camera is a Melexis MLX90641 (16x12), NOT an MLX90640. There is no
+    # MLX90641 driver on PyPI; it is driven via the vendor C library
+    # (github.com/melexis/mlx90641-library). See docs/thermal-camera.md.
     "lgpio>=0.2.2.0 ; platform_machine == 'aarch64' and sys_platform == 'linux'",
     "matplotlib>=3.11.2",
     "numpy>=2.5.3",

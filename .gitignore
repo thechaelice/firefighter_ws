@@ -19,6 +19,9 @@ Makefile
 *.a
 *.so
 
+# Thermal camera reader (built by scripts/thermal/build.sh)
+/scripts/thermal/mlx90641_frames
+
 # Logs
 *.log
 

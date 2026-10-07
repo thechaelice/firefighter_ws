@@ -22,7 +22,7 @@ flowchart TD
             Lidar[RPLiDAR Sensor] -->|Serial| ROS_Scan[ROS 2: sllidar_ros2]
             ROS_Scan -->|/scan| ROS_Odom[ROS 2: rf2o_laser_odometry]
             ROS_Odom -->|/odom_rf2o + TF| SLAM[SLAM & Navigation Stack]
-            Thermal[Thermal Camera - Planned] --> ML[Flame Localization & ML - Planned]
+            Thermal[Thermal Camera - MLX90641 16x12] --> ML[Flame Localization & ML - In development]
             Extinguisher[Fire Retardant Dispenser - Planned]
         end
 
@@ -39,7 +39,9 @@ The robot is built with a dual-controller architecture:
 * **Raspberry Pi (High-Level Computing & Perception)**:
   * Runs ROS 2 (Jazzy) for sensor processing, LiDAR SLAM, mapping, path planning, and ML workloads.
   * Interfaces with the LiDAR for real-time laser odometry and 2D environmental mapping.
-  * Thermal image processing to pinpoint the exact location and base of the flame (*in development*).
+  * Thermal imaging with a **Melexis MLX90641** (16 × 12 = 192-pixel) IR array on
+    I²C (`0x33`) to pinpoint the base of the flame — driver verified, perception in
+    development (see [`docs/thermal-camera.md`](docs/thermal-camera.md)).
 * **ESP32 (Mobility & Hardware Control)**:
   * Handles low-level motor drivers, wheel velocity control, and wheel odometry.
   * Maintains the ESP-NOW communication link with fire alert beacons.
@@ -50,7 +52,7 @@ The robot is built with a dual-controller architecture:
 
 1. **Detection & Alert**: An ESP32 beacon senses smoke/fire and dispatches a beacon alert packet via ESP-NOW.
 2. **Dispatch & Navigation**: The robot receives the alert and uses LiDAR-based SLAM and odometry (`rf2o_laser_odometry`) to navigate autonomously to the reported room.
-3. **Flame Localization**: Once in proximity, an onboard thermal camera scans the area to pinpoint the exact fire source.
+3. **Flame Localization**: Once in proximity, the onboard **MLX90641** thermal camera (16 × 12 IR array) scans the area to pinpoint the exact fire source.
 4. **Fire Suppression**: The robot positions itself and activates the fire retardant dispensing mechanism to extinguish the flames.
 
 ---
@@ -63,12 +65,13 @@ The robot is built with a dual-controller architecture:
 | **Laser Odometry** | `rf2o_laser_odometry` | ✅ Implemented | Computes planar odometry (`/odom_rf2o`, `odom → base_link` TF) |
 | **Live LiDAR Terminal Viewer** | `scripts/ascii_lidar_view.py` | ✅ Implemented | Headless polar ASCII radar visualizer for `/scan` |
 | **LiDAR Web Viewer** | `scripts/lidar_web_viewer.py` | ✅ Implemented | Browser-based 2D `/scan` and optional 3D `PointCloud2` visualization |
+| **Thermal Frame Capture/Render** | `scripts/thermal_frames.py` + `scripts/thermal/` | ✅ Implemented | Captures Melexis **MLX90641** frames and renders PNG heat maps (see [`docs/thermal-camera.md`](docs/thermal-camera.md)) |
 | **Pi ↔ ESP32 Serial Bridge** | `firefighter_bridge` (ament_python) | ✅ Implemented | Framed UART link: `/cmd_vel` → `SET_TWIST`, wheel odom, beacon events (see [`src/firefighter_bridge/`](src/firefighter_bridge/README.md)) |
 | **Mission Behaviour FSM** | `firefighter_mission` (ament_python) | ✅ Implemented | `beacon → navigate → search → suppress → verify` state machine, e-stop, bounded timeouts (see [`src/firefighter_mission/`](src/firefighter_mission/README.md)) |
 | **ESP-NOW Fire Beacon** | ESP32 + Smoke/Heat Sensor | 🚧 Planned / In Development | Sensor trigger and wireless alert transmission (see [`firmware/`](firmware/README.md)) |
 | **Robot Mobility Controller** | ESP32 + Motor Drivers | ✅ In Firmware | Motor control firmware and ESP-NOW receiver (see [`firmware/`](firmware/README.md)) |
 | **SLAM & Path Planning** | Nav2 / SLAM Toolbox | 🚧 In Progress | Autonomous navigation and dynamic obstacle avoidance |
-| **Thermal Flame Localization**| Thermal Camera + ML Model | ⏳ Planned | Infrared imaging and flame coordinate targeting |
+| **Thermal Flame Localization**| Melexis **MLX90641** (16 × 12) + ML model | 🚧 In Progress | Sensor identified & read verified (see [`docs/thermal-camera.md`](docs/thermal-camera.md)); perception & ML pending |
 | **Fire Retardant Dispenser** | Actuator / Pump / Nozzle | ⏳ Planned | Automated fire suppression dispenser |
 
 ### Upstream ROS 2 Packages
