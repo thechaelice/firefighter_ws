@@ -135,6 +135,29 @@ Then open <https://studio.foxglove.dev/> in a browser, connect to `ws://<pi-ip>:
 cd ~/firefighter_ws && source install/setup.bash && python3 scripts/ascii_lidar_view.py
 ```
 
+### Browser-based 2D / 3D viewer
+
+Run the server on the Pi after sourcing the ROS 2 workspace:
+
+```bash
+cd ~/firefighter_ws && source install/setup.bash
+python3 scripts/lidar_web_viewer.py
+```
+
+From a browser on the same trusted network, open `http://<pi-ip>:8080/`.
+The 2D panel subscribes to `/scan` by default. For volumetric data, pass a
+`PointCloud2` topic such as:
+
+```bash
+python3 scripts/lidar_web_viewer.py --pointcloud-topic /points
+```
+
+This RPLIDAR publishes planar `LaserScan` data; its 3D view is therefore flat
+unless another node publishes a `PointCloud2`. Use `--scan-topic`, `--port`,
+and `--max-cloud-points` to override the defaults. The server binds to all
+network interfaces on port 8080 and has no authentication, so only run it on a
+trusted network.
+
 ### Tweakable parameters
 
 ```bash

@@ -62,6 +62,7 @@ The robot is built with a dual-controller architecture:
 | **LiDAR Driver** | RPLiDAR + `sllidar_ros2` | ✅ Implemented | Reads LiDAR data and publishes `/scan` topic |
 | **Laser Odometry** | `rf2o_laser_odometry` | ✅ Implemented | Computes planar odometry (`/odom_rf2o`, `odom → base_link` TF) |
 | **Live LiDAR Terminal Viewer** | `scripts/ascii_lidar_view.py` | ✅ Implemented | Headless polar ASCII radar visualizer for `/scan` |
+| **LiDAR Web Viewer** | `scripts/lidar_web_viewer.py` | ✅ Implemented | Browser-based 2D `/scan` and optional 3D `PointCloud2` visualization |
 | **Pi ↔ ESP32 Serial Bridge** | `firefighter_bridge` (ament_python) | ✅ Implemented | Framed UART link: `/cmd_vel` → `SET_TWIST`, wheel odom, beacon events (see [`src/firefighter_bridge/`](src/firefighter_bridge/README.md)) |
 | **Mission Behaviour FSM** | `firefighter_mission` (ament_python) | ✅ Implemented | `beacon → navigate → search → suppress → verify` state machine, e-stop, bounded timeouts (see [`src/firefighter_mission/`](src/firefighter_mission/README.md)) |
 | **ESP-NOW Fire Beacon** | ESP32 + Smoke/Heat Sensor | 🚧 Planned / In Development | Sensor trigger and wireless alert transmission (see [`firmware/`](firmware/README.md)) |
@@ -163,5 +164,24 @@ For headless debugging over SSH:
 ```bash
 python3 scripts/ascii_lidar_view.py
 ```
+
+### 5. Optional: Browser LiDAR Viewer
+
+Start the web server on the Raspberry Pi:
+
+```bash
+python3 scripts/lidar_web_viewer.py
+```
+
+Open `http://<pi-ip>:8080/` from a browser on the same network. The 2D view
+uses `/scan`; the 3D view can also display a `PointCloud2` topic when configured:
+
+```bash
+python3 scripts/lidar_web_viewer.py --pointcloud-topic /points
+```
+
+The RPLIDAR publishes planar `LaserScan` data, so without a `PointCloud2` topic
+the 3D view shows the scan as a flat plane. The web server has no authentication;
+use it only on a trusted network.
 
 For detailed setup, troubleshooting, and port configuration, refer to [`docs/runbook.md`](docs/runbook.md).
