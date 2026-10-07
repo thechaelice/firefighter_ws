@@ -8,11 +8,33 @@ authors = [
     { name = "al-chris", email = "christopheraliu07@gmail.com" }
 ]
 requires-python = ">=3.12"
-dependencies = []
+dependencies = [
+    "lgpio>=0.2.2.0 ; platform_machine == 'aarch64' and sys_platform == 'linux'",
+    "matplotlib>=3.11.2",
+    "numpy>=2.5.3",
+    "pyserial>=3.5 ; platform_machine == 'aarch64' and sys_platform == 'linux'",
+    "scipy>=1.18.1",
+]
 
-[project.scripts]
-firefighter-ws = "firefighter_ws:main"
+# NOTE: this repository is a ROS 2 (colcon) workspace plus ESP32 firmware, not a
+# distributable Python package - there is no importable `firefighter_ws` module.
+# There is therefore deliberately no `[build-system]` table here: uv then manages
+# this project's dependencies without trying to build/install the project itself.
+#
+# Adding `[build-system]` with the `uv_build` backend makes `uv add` fail with:
+#   Expected a Python module at: src/firefighter_ws/__init__.py
+# If a console script is ever wanted, add a real package (e.g.
+# src/firefighter_ws/__init__.py with a main()) AND the build-system table, or
+# use `[tool.uv] package = false` to opt out of packaging explicitly.
 
-[build-system]
-requires = ["uv_build>=0.12.23,<0.13.0"]
-build-backend = "uv_build"
+[dependency-groups]
+# `uv run --group test pytest`  (pure Python - no ROS needed)
+test = [
+    "pytest>=7.4",
+]
+# `uv run --group plot scripts/plot_bag.py`
+plot = [
+    "matplotlib>=3.11.2",
+    "numpy>=2.5.3",
+    "scipy>=1.18.1",
+]

@@ -2,7 +2,7 @@
 """Live ASCII LiDAR viewer (headless).
 
 Subscribes to /scan and renders a live polar "radar" view in the terminal.
-Run after sourcing the workspace:  python3 ascii_lidar_view.py
+Run after sourcing the workspace:  python3 scripts/ascii_lidar_view.py
 """
 import math
 import sys

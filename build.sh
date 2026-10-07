@@ -3,7 +3,7 @@
 # build.sh - memory/IO-safe colcon build wrapper for firefighter_ws (Raspberry Pi 4)
 #
 # ---------------------------------------------------------------------------
-# WHY THIS EXISTS  (see README "Build" section and run.md for the full story)
+# WHY THIS EXISTS  (see README "Build" section and docs/runbook.md for the full story)
 # ---------------------------------------------------------------------------
 # A plain `colcon build --symlink-install` on this machine is what locks the Pi
 # up. Two things combine badly:

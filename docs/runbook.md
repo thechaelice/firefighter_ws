@@ -132,13 +132,13 @@ Then open <https://studio.foxglove.dev/> in a browser, connect to `ws://<pi-ip>:
 ### ASCII radar view (terminal, no display needed)
 
 ```bash
-cd ~/firefighter_ws && source install/setup.bash && python3 ascii_lidar_view.py
+cd ~/firefighter_ws && source install/setup.bash && python3 scripts/ascii_lidar_view.py
 ```
 
 ### Tweakable parameters
 
 ```bash
-python3 ascii_lidar_view.py --ros-args \
+python3 scripts/ascii_lidar_view.py --ros-args \
   -p scan_topic:=/scan \
   -p max_range:=10.0 \
   -p size:=61 \

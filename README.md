@@ -61,7 +61,8 @@ The robot is built with a dual-controller architecture:
 |---|---|---|---|
 | **LiDAR Driver** | RPLiDAR + `sllidar_ros2` | ✅ Implemented | Reads LiDAR data and publishes `/scan` topic |
 | **Laser Odometry** | `rf2o_laser_odometry` | ✅ Implemented | Computes planar odometry (`/odom_rf2o`, `odom → base_link` TF) |
-| **Live LiDAR Terminal Viewer** | `ascii_lidar_view.py` | ✅ Implemented | Headless polar ASCII radar visualizer for `/scan` |
+| **Live LiDAR Terminal Viewer** | `scripts/ascii_lidar_view.py` | ✅ Implemented | Headless polar ASCII radar visualizer for `/scan` |
+| **Pi ↔ ESP32 Serial Bridge** | `firefighter_bridge` (ament_python) | ✅ Implemented | Framed UART link: `/cmd_vel` → `SET_TWIST`, wheel odom, beacon events (see [`src/firefighter_bridge/`](src/firefighter_bridge/README.md)) |
 | **ESP-NOW Fire Beacon** | ESP32 + Smoke/Heat Sensor | 🚧 Planned / In Development | Sensor trigger and wireless alert transmission (see [`firmware/`](firmware/README.md)) |
 | **Robot Mobility Controller** | ESP32 + Motor Drivers | ✅ In Firmware | Motor control firmware and ESP-NOW receiver (see [`firmware/`](firmware/README.md)) |
 | **SLAM & Path Planning** | Nav2 / SLAM Toolbox | 🚧 In Progress | Autonomous navigation and dynamic obstacle avoidance |
@@ -152,7 +153,7 @@ ros2 launch rf2o_laser_odometry rf2o_laser_odometry.launch.py
 For headless debugging over SSH:
 
 ```bash
-python3 ascii_lidar_view.py
+python3 scripts/ascii_lidar_view.py
 ```
 
-For detailed setup, troubleshooting, and port configuration, refer to [`run.md`](run.md).
+For detailed setup, troubleshooting, and port configuration, refer to [`docs/runbook.md`](docs/runbook.md).
