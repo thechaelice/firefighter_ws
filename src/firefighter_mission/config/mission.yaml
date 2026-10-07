@@ -1,0 +1,33 @@
+# Parameters for firefighter_mission/mission_node.
+firefighter_mission:
+  ros__parameters:
+    # ---- topics -----------------------------------------------------
+    beacon_topic: /beacon_event        # in:  from firefighter_bridge
+    flame_topic: /flame_event          # in:  from firefighter_perception (later)
+    goal_topic: /goal_pose             # out: navigation target
+    cmd_vel_topic: /cmd_vel            # out: search spin + stop (feeds the bridge)
+    suppress_topic: "~/suppress"       # out: Bool, extinguisher on/off
+    state_topic: "~/state"             # out: String, current FSM state
+    event_topic: "~/event"             # in:  String, manual event injection
+    diagnostics_topic: /diagnostics    # out
+
+    # ---- goal selection --------------------------------------------
+    goal_frame: map
+    goal_x: 0.0                        # fallback goal when no beacon map entry
+    goal_y: 0.0
+    goal_yaw: 0.0
+    beacon_goals_file: ""              # YAML: "aa:bb:cc:dd:ee:ff: {x: 3.0, y: 1.5, yaw: 0.0}"
+
+    # ---- behaviour --------------------------------------------------
+    search_spin_rate: 0.5              # rad/s sweep while SEARCHING
+    tick_rate_hz: 10.0
+
+    # ---- FSM timings ------------------------------------------------
+    confirm_window_s: 5.0              # MUST exceed the beacon period (~2 s)
+    nav_timeout_s: 120.0
+    search_timeout_s: 30.0
+    approach_timeout_s: 20.0
+    suppress_duration_s: 10.0
+    verify_timeout_s: 5.0
+    complete_hold_s: 3.0
+    max_suppress_attempts: 3
