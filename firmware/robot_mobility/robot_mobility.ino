@@ -29,6 +29,7 @@
 
 #include <WiFi.h>
 #include <esp_now.h>
+#include <esp_wifi.h>
 
 #include "firefighter_protocol.h"
 
@@ -329,7 +330,7 @@ void sendBeaconEvent(const struct_message& m, uint8_t rssi, const uint8_t* mac) 
   ff::put_u32(p,     (uint32_t)m.messageNumber);
   ff::put_u8 (p + 4, m.fireDetected  ? 1 : 0);
   ff::put_u8 (p + 5, m.smokeDetected ? 1 : 0);
-  ff::put_u8 (p + 6, rssi);       // 0 on ESP32 core 2.0.x (no RSSI in recv cb)
+  ff::put_u8 (p + 6, rssi);       // signal strength magnitude in dBm (e.g. 65 for -65 dBm)
   memcpy(p + 7, mac, 6);
   sendFrame(ff::MSG_BEACON_EVENT, p, 13);
 }
@@ -471,24 +472,42 @@ void fallbackUpdate() {
 
 
 // ============================================================
-// ESP-NOW RECEIVE CALLBACK
+// ESP-NOW & PROMISCUOUS RSSI CAPTURE
 //
-// Always forward the beacon event to the Pi. In fallback mode
-// also run the consecutive-detection trigger.
+// In ESP-IDF 5.x / Core 3.x, esp_now_recv_info_t provides rx_ctrl.
+// In ESP-IDF 4.x / Core 2.0.x, a promiscuous sniffer hook extracts
+// the raw RSSI from incoming 802.11 frames.
 // ============================================================
 
-void OnDataRecv(const uint8_t* mac_addr, const uint8_t* incomingDataBytes, int len) {
+static volatile int8_t latestRssi = 0;
+
+void promiscuousRxCallback(void* buf, wifi_promiscuous_pkt_type_t type) {
+  if (type != WIFI_PKT_MGMT && type != WIFI_PKT_DATA) return;
+  const wifi_promiscuous_pkt_t* pkt = (const wifi_promiscuous_pkt_t*)buf;
+  latestRssi = pkt->rx_ctrl.rssi;
+}
+
+#if defined(ESP_IDF_VERSION) && (ESP_IDF_VERSION >= ESP_IDF_VERSION_VAL(5, 0, 0))
+void OnDataRecv(const esp_now_recv_info_t *info, const uint8_t *incomingDataBytes, int len) {
   if (len != (int)sizeof(incomingData)) return;
 
   memcpy(&incomingData, incomingDataBytes, sizeof(incomingData));
 
-  // 1) Gateway: always tell the Pi
-  sendBeaconEvent(incomingData, 0, mac_addr);
+  int8_t rawRssi = (info && info->rx_ctrl) ? info->rx_ctrl->rssi : latestRssi;
+  uint8_t rssiMag = (rawRssi < 0) ? (uint8_t)(-rawRssi) : (uint8_t)rawRssi;
 
-  DBG("[espnow] #%d FIRE=%d SMOKE=%d\n",
+  const uint8_t* mac_addr = info ? info->src_addr : nullptr;
+  static const uint8_t zeroMac[6] = {0};
+  if (!mac_addr) mac_addr = zeroMac;
+
+  // 1) Gateway: forward to the Pi with RSSI
+  sendBeaconEvent(incomingData, rssiMag, mac_addr);
+
+  DBG("[espnow] #%d FIRE=%d SMOKE=%d RSSI=-%d dBm\n",
       incomingData.messageNumber,
       incomingData.fireDetected  ? 1 : 0,
-      incomingData.smokeDetected ? 1 : 0);
+      incomingData.smokeDetected ? 1 : 0,
+      rssiMag);
 
   // 2) Fallback trigger
   if (MOTION_OWNER_IS_PI) return;
@@ -504,6 +523,39 @@ void OnDataRecv(const uint8_t* mac_addr, const uint8_t* incomingDataBytes, int l
     consecutiveDetectionCount = 0;
   }
 }
+#else
+void OnDataRecv(const uint8_t* mac_addr, const uint8_t* incomingDataBytes, int len) {
+  if (len != (int)sizeof(incomingData)) return;
+
+  memcpy(&incomingData, incomingDataBytes, sizeof(incomingData));
+
+  int8_t rawRssi = latestRssi;
+  uint8_t rssiMag = (rawRssi < 0) ? (uint8_t)(-rawRssi) : (uint8_t)rawRssi;
+
+  // 1) Gateway: forward to the Pi with RSSI
+  sendBeaconEvent(incomingData, rssiMag, mac_addr);
+
+  DBG("[espnow] #%d FIRE=%d SMOKE=%d RSSI=-%d dBm\n",
+      incomingData.messageNumber,
+      incomingData.fireDetected  ? 1 : 0,
+      incomingData.smokeDetected ? 1 : 0,
+      rssiMag);
+
+  // 2) Fallback trigger
+  if (MOTION_OWNER_IS_PI) return;
+  if (fbState != FB_IDLE)  return;   // ignore during a maneuver
+
+  if (incomingData.fireDetected && incomingData.smokeDetected) {
+    consecutiveDetectionCount++;
+    if (consecutiveDetectionCount >= REQUIRED_DETECTIONS) {
+      consecutiveDetectionCount = 0;
+      fbEnter(FB_FWD);
+    }
+  } else {
+    consecutiveDetectionCount = 0;
+  }
+}
+#endif
 
 
 // ============================================================
@@ -555,6 +607,14 @@ void setup() {
   // ---- Wi-Fi + ESP-NOW -----------------------------------
   WiFi.mode(WIFI_STA);
   delay(100);   // one-off, pre-loop
+
+  // Enable Wi-Fi promiscuous rx sniffer to capture packet RSSI in core 2.0.x
+  wifi_promiscuous_filter_t filter = {
+    .filter_mask = WIFI_PROMIS_FILTER_MASK_DATA | WIFI_PROMIS_FILTER_MASK_MGMT
+  };
+  esp_wifi_set_promiscuous_filter(&filter);
+  esp_wifi_set_promiscuous_rx_cb(promiscuousRxCallback);
+  esp_wifi_set_promiscuous(true);
 
   DBG.print("Receiver MAC Address: ");
   DBG.println(WiFi.macAddress());

@@ -57,10 +57,16 @@ typedef struct struct_message {
    ```text
    Receiver MAC Address: XX:XX:XX:XX:XX:XX
    ```
-3. Enter this MAC address in `firmware/beacon/beacon.ino` inside the `broadcastAddress` array:
+3. Enter this MAC address in `firmware/beacon/beacon.ino` inside the `receiverMAC` array:
    ```cpp
-   uint8_t broadcastAddress[] = {0xXX, 0xXX, 0xXX, 0xXX, 0xXX, 0xXX};
+   uint8_t receiverMAC[] = {0xXX, 0xXX, 0xXX, 0xXX, 0xXX, 0xXX};
    ```
+
+### Signal Strength (RSSI) & Distance Estimation
+* **Interim (Active)**: The mobility ESP32 captures the received packet signal strength (RSSI in dBm) via a promiscuous Wi-Fi hook (Core 2.0.x) or `esp_now_recv_info_t` (Core 3.0.x) and forwards it in `MSG_BEACON_EVENT` to ROS 2 topic `/beacon_event`.
+  * Typical indoor Wi-Fi path-loss formula: $\text{RSSI} \approx \text{RSSI}_0 - 10 n \log_{10}(d)$.
+  * Provides coarse proximity indication (e.g. Strong: $-40\text{ to }-55\text{ dBm} \rightarrow <2\text{m}$, Moderate: $-60\text{ to }-75\text{ dBm} \rightarrow 2\text{--}6\text{m}$, Weak: $<-80\text{ dBm} \rightarrow >6\text{m}$).
+* **Target Upgrade (UWB Ranging)**: Ultra-Wideband Two-Way Ranging (DWM1000/DWM3000) for high-precision $\pm 5\text{--}10\text{ cm}$ indoor ranging. See the [UWB Migration Guide](../docs/uwb-ranging-migration.md).
 
 ---
 

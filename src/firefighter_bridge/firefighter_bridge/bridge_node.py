@@ -328,9 +328,10 @@ class FirefighterBridge(Node):
         msg.rssi = event.rssi
         msg.mac = list(event.mac)
         self._beacon_pub.publish(msg)
+        rssi_str = f" rssi=-{event.rssi}dBm" if event.rssi > 0 else ""
         self.get_logger().info(
             f"beacon #{event.message_number} "
-            f"fire={event.fire_detected} smoke={event.smoke_detected}"
+            f"fire={event.fire_detected} smoke={event.smoke_detected}{rssi_str}"
         )
 
     # ------------------------------------------------------------------
