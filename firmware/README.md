@@ -93,6 +93,9 @@ typedef struct struct_message {
 
 ## 3. Behavior & Trigger Logic
 
+> **Note:** the legacy trigger/maneuver described here now runs **only as a fallback**
+> (`MOTION_OWNER_IS_PI 0`). By default the Pi owns motion — see [§5](#5-pi--esp32-uart-link-option-a--active).
+
 ### Trigger Condition
 * The robot requires **2 consecutive packets** with both `fireDetected == true` and `smokeDetected == true` before triggering movement to prevent false positives.
 * If a packet arrives without both conditions satisfied, the consecutive counter resets to 0.
@@ -122,3 +125,57 @@ When triggered, the robot executes the following fixed sequence:
 * **Flash Frequency**: `80MHz`
 * **Upload Speed**: `921600` (or `115200` if flashing fails)
 * **Baud Rate**: `115200`
+
+---
+
+## 5. Pi ↔ ESP32 UART Link (Option A — active)
+
+The mobility ESP32 is now a **gateway**: it keeps the ESP-NOW link to the beacon and
+bridges everything to the Raspberry Pi over a framed binary UART protocol.
+
+```
+Beacon --ESP-NOW--> [Mobility ESP32] --UART2--> Raspberry Pi (ROS 2)
+```
+
+### Wiring
+| Pi | ESP32 | Note |
+|---|---|---|
+| GPIO14 (TXD) | GPIO16 (RX) | UART2, 115200 8N1 |
+| GPIO15 (RXD) | GPIO17 (TX) | do **not** use UART1 (GPIO9/10 — flash pins) |
+| GND | GND | required |
+
+Both sides are 3.3 V — no level shifter. The Pi must expose a UART on GPIO14/15
+(see [`docs/runbook.md`](../docs/runbook.md): `dtoverlay=miniuart-bt` and remove the serial console).
+
+### Protocol
+Defined once in [`robot_mobility/firefighter_protocol.h`](robot_mobility/firefighter_protocol.h).
+Frame: `A5 5A | LEN | MSG_ID | PAYLOAD | CRC16-LE` (CRC-16/CCITT-FALSE over LEN..payload).
+
+| Pi → ESP32 | | ESP32 → Pi | |
+|---|---|---|---|
+| `SET_TWIST` `0x01` | f32 lin, ang | `WHEEL_ODOM` `0x81` | i32 ticksL/R, u32 dt_us |
+| `ESTOP` `0x02` | — | `STATUS` `0x82` | u16 vbat, u8 flags, u8 mode |
+| `RESET_FAULT` `0x03` | — | `BEACON_EVENT` `0x83` | u32 msg, fire, smoke, rssi, mac |
+| `HEARTBEAT` `0x04` | u16 seq | `ACK` `0x84` / `HB_ESP` `0x85` | |
+
+### Motion ownership
+Set by `MOTION_OWNER_IS_PI` at the top of `robot_mobility.ino`:
+
+* **`1` (default)** — the Pi owns motion: it streams `SET_TWIST`, and beacon events are
+  only *forwarded* so the Pi's autonomy stack decides what to do.
+* **`0`** — fallback: the ESP32 runs its original fixed forward/right/left maneuver on
+  two consecutive beacon FIRE + SMOKE detections (still non-blocking).
+
+### Safety
+* **Watchdog** — in Pi mode, no valid frame for `PI_TIMEOUT_MS` (500 ms) → motors stop.
+* **E-stop** — `ESTOP` latches a stop until `RESET_FAULT` arrives.
+* The whole control path is `millis()`-based; the legacy blocking `delay()` maneuver
+  is preserved as `robot_mobility.blocking.bak` for reference.
+
+---
+
+## 6. Option B — micro-ROS (deferred)
+
+An alternative where the ESP32 becomes a native ROS 2 node via `micro_ros_agent`,
+removing the custom protocol. Kept on the shelf, not built.
+See [`docs/option-b-micro-ros.md`](../docs/option-b-micro-ros.md).

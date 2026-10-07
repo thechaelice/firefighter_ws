@@ -1,0 +1,33 @@
+# Parameters for firefighter_bridge/bridge_node.
+#
+# Adjust `port`, wheel geometry and tick counts to the real robot. `ticks_per_rev`
+# is the ENCODER count per wheel revolution - the firmware counts quadrature x4,
+# so a 360 CPR encoder gives 1440.
+firefighter_bridge:
+  ros__parameters:
+    # ---- UART link -------------------------------------------------
+    port: /dev/ttyAMA0        # PL011 on GPIO14/15 (see docs/runbook.md)
+    baud: 115200
+
+    # ---- /cmd_vel -> SET_TWIST -------------------------------------
+    cmd_vel_topic: /cmd_vel
+    cmd_rate_hz: 20.0         # how often SET_TWIST is streamed
+    cmd_timeout_s: 0.5        # stale /cmd_vel -> command zero (must be < ESP watchdog)
+
+    # ---- WHEEL_ODOM -> odometry ------------------------------------
+    odom_topic: /wheel_odom   # NOT /odom: rf2o owns odom->base_link (see README)
+    publish_tf: false         # leave false while rf2o broadcasts odom->base_link
+    odom_frame: odom
+    base_frame: base_link
+    wheel_radius_m: 0.0325
+    ticks_per_rev: 1440       # 360 CPR x4 quadrature
+    track_width_m: 0.20
+
+    # ---- Events / status -------------------------------------------
+    beacon_topic: /beacon_event
+    battery_topic: /battery
+    diagnostics_topic: /diagnostics
+
+    # ---- Health ----------------------------------------------------
+    heartbeat_hz: 2.0         # HEARTBEAT frames sent to the ESP32
+    esp_timeout_s: 2.0        # warn if the ESP32 goes quiet this long
