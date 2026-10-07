@@ -1,0 +1,18 @@
+[project]
+name = "firefighter-ws"
+version = "0.1.0"
+description = "Autonomous firefighter robot with wireless ESP-NOW beacon sensing, LiDAR SLAM navigation, and thermal flame localization"
+readme = "README.md"
+authors = [
+    { name = "thechaelice", email = "thechalice22@gmail.com" },
+    { name = "al-chris", email = "christopheraliu07@gmail.com" }
+]
+requires-python = ">=3.12"
+dependencies = []
+
+[project.scripts]
+firefighter-ws = "firefighter_ws:main"
+
+[build-system]
+requires = ["uv_build>=0.12.23,<0.13.0"]
+build-backend = "uv_build"

@@ -1,6 +1,6 @@
 # Running the LiDAR Odometry Workspace
 
-ROS 2 workspace (`~/ros2_ws`) with two packages:
+ROS 2 workspace (`~/firefighter_ws`) with two packages:
 
 - **`sllidar_ros2`** — SLAMTEC RPLIDAR driver. Reads the LiDAR over serial and publishes `sensor_msgs/LaserScan` on `/scan`.
 - **`rf2o_laser_odometry`** — RF2O planar laser odometry. Subscribes to `/scan`, publishes `nav_msgs/Odometry` on `/odom_rf2o` and broadcasts TF `odom → base_link`.
@@ -16,12 +16,35 @@ flowchart LR
 
 ## 1. Build
 
+> **Do not run a bare `colcon build --symlink-install` on this Pi 4.**
+> colcon invokes each package as `cmake --build ... -- -j4 -l4` and builds both
+> packages concurrently — up to 8 `g++` jobs on a 4-core board with 3.7 GB RAM
+> and no swap. The resulting memory pressure wedges the SD/MMC controller, and
+> because the root filesystem *and* the Wi-Fi radio share the MMC/SDIO bus, the
+> Pi simultaneously loses disk I/O and networking. SSH drops, cannot reconnect,
+> and the board must be power-cycled.
+
+Prefer the wrapper, which caps the build to one compiler job and one package at
+a time:
+
 ```bash
-cd ~/ros2_ws
+cd ~/firefighter_ws
+./build.sh
+```
+
+The underlying command it runs:
+
+```bash
+cd ~/firefighter_ws
 source /opt/ros/jazzy/setup.bash
-colcon build --symlink-install
+MAKEFLAGS="-j1 -l1" colcon build --symlink-install --executor sequential
 source install/setup.bash
 ```
+
+`JOBS=2 ./build.sh` is usually still safe if the Pi is otherwise idle.
+
+See [README → Build the Workspace](README.md#1-build-the-workspace) for the
+hardening steps (zram swap, `earlyoom`, USB-SSD root) that make builds robust.
 
 ---
 
@@ -55,7 +78,7 @@ sudo chmod 777 /dev/ttyUSB0
 ## 4. Run the LiDAR driver
 
 ```bash
-cd ~/ros2_ws && source install/setup.bash
+cd ~/firefighter_ws && source install/setup.bash
 ros2 launch sllidar_ros2 sllidar_a1_launch.py serial_port:=/dev/ttyUSB0
 ```
 
@@ -81,7 +104,7 @@ ros2 topic echo /scan --once # should print a LaserScan message
 ## 5. Run the odometry
 
 ```bash
-cd ~/ros2_ws && source install/setup.bash
+cd ~/firefighter_ws && source install/setup.bash
 ros2 launch rf2o_laser_odometry rf2o_laser_odometry.launch.py
 ```
 
@@ -109,7 +132,7 @@ Then open <https://studio.foxglove.dev/> in a browser, connect to `ws://<pi-ip>:
 ### ASCII radar view (terminal, no display needed)
 
 ```bash
-cd ~/ros2_ws && source install/setup.bash && python3 ascii_lidar_view.py
+cd ~/firefighter_ws && source install/setup.bash && python3 ascii_lidar_view.py
 ```
 
 ### Tweakable parameters
