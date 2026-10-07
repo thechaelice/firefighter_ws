@@ -30,3 +30,5 @@ Thumbs.db
 # SLAM maps: keep the folder, ignore generated map files
 /maps/*
 !/maps/.gitkeep
+
+.vscode/settings.json
