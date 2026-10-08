@@ -3,7 +3,8 @@
 // ESP32 Arduino Core 2.0.x
 //
 // ROLE
-//   * Low-level motor + encoder controller
+//   * Low-level motor + encoder controller, with closed-loop
+//     (feedforward + PI) wheel speed control on SET_TWIST
 //   * UART gateway between the Raspberry Pi (ROS 2) and the
 //     wireless fire beacon (ESP-NOW)
 //
@@ -162,13 +163,51 @@ const int MOTOR_DEADBAND = 8;
 // ============================================================
 
 const float TRACK_WIDTH_M  = 0.20f;   // distance between wheels (m)
-const float MAX_WHEEL_MPS  = 0.50f;   // wheel speed that maps to PWM 255
+const float MAX_WHEEL_MPS  = 0.50f;   // fastest wheel speed a command may ask for
 const float MIN_WHEEL_MPS  = 0.01f;   // commands below this are treated as stop
 
-// Lowest PWM at which the wheels reliably turn under load. CALIBRATE on the
-// robot (scripts/motor_test.py): raise it if slow commands still only hum,
-// lower it if the slowest motion is too fast.
+// Wheel + encoder (MUST MATCH wheel_radius_m / ticks_per_rev in the
+// bridge's config/bridge.yaml, or the two sides disagree about speed).
+const float WHEEL_RADIUS_M        = 0.0325f;
+const long  ENCODER_TICKS_PER_REV = 1440;     // 360 CPR x4 quadrature
+const float METERS_PER_TICK =
+    (2.0f * 3.14159265f * WHEEL_RADIUS_M) / (float)ENCODER_TICKS_PER_REV;
+
+// Lowest PWM at which the wheels reliably turn under load. Used as the
+// feedforward starting point; the speed loop corrects from there. CALIBRATE on
+// the robot (scripts/motor_test.py).
 const int MOTOR_MIN_MOVE_PWM = 120;
+
+
+// ============================================================
+// CLOSED-LOOP WHEEL SPEED CONTROL
+//
+// Each wheel runs feedforward + PI on its encoder speed, so a
+// SET_TWIST of 0.05 m/s gives 0.05 m/s rather than whatever a fixed
+// PWM happens to produce. Gains are starting values - TUNE on the
+// robot: raise VEL_KI if slow commands take long to start, lower
+// VEL_KP / VEL_KI if the wheels surge or oscillate.
+//
+// REQUIRES each encoder to count UP when its wheel drives the robot
+// forward. If one counts down, flip M1_ENC_INVERT / M2_ENC_INVERT.
+// A wheel whose encoder disagrees with its motor (wrong sign, or no
+// counts at all) trips encoderFault: both wheels drop back to
+// open-loop feedforward until MSG_RESET_FAULT, so a bad encoder can
+// never wind the loop up to full speed.
+//
+// Set VELOCITY_CONTROL_ENABLED to 0 to run open-loop feedforward only.
+// ============================================================
+
+#define VELOCITY_CONTROL_ENABLED 1
+
+const uint32_t VEL_PERIOD_MS    = 20;       // 50 Hz control loop
+const float    VEL_KP           = 150.0f;   // PWM per (m/s) of speed error
+const float    VEL_KI           = 1500.0f;  // PWM per (m/s) of error, per second
+const float    VEL_FILTER_ALPHA = 0.5f;     // low-pass on measured speed (1 = none)
+
+const int      ENC_FAULT_PWM     = 150;     // "driving hard" threshold
+const float    ENC_FAULT_MIN_MPS = 0.02f;   // slower than this counts as not moving
+const uint32_t ENC_FAULT_MS      = 700;     // how long the disagreement must last
 
 
 // ============================================================
@@ -220,6 +259,23 @@ volatile long motor2_encoder_count = 0;
 // Last commanded motor magnitudes (for the MOVING status flag)
 int motorCmdA = 0;
 int motorCmdB = 0;
+
+// Per-wheel speed controller. Declared here, before the first function,
+// for the same prototype-hoisting reason as FbState below.
+struct WheelCtl {
+  float    target;      // commanded speed, m/s (+ = robot forward)
+  float    measured;    // filtered encoder speed, m/s
+  float    integral;    // PI integral term, in PWM counts
+  long     prevTicks;   // encoder count at the previous control step
+  uint32_t badSinceMs;  // when encoder and motor started to disagree (0 = fine)
+};
+
+WheelCtl wheelL = {0.0f, 0.0f, 0.0f, 0, 0};
+WheelCtl wheelR = {0.0f, 0.0f, 0.0f, 0, 0};
+
+bool     velControlActive = false;   // true while SET_TWIST owns the motors
+bool     encoderFault     = false;   // latched: speed loop disabled, open-loop only
+uint32_t lastVelMs        = 0;
 
 // Watchdog / faults
 uint32_t lastPiFrameMs = 0;
@@ -278,10 +334,15 @@ void stopMotors() {
   ledcWrite(PWM_B, 0);
   motorCmdA = 0;
   motorCmdB = 0;
+
+  // Also release the speed loop, or its next step would re-energise the motors.
+  velControlActive = false;
+  wheelL.target = wheelR.target = 0.0f;
+  wheelL.integral = wheelR.integral = 0.0f;
 }
 
-// Wheel speed (m/s) -> signed PWM. The motors do not turn below
-// MOTOR_MIN_MOVE_PWM, so a non-zero speed is mapped onto
+// Open-loop feedforward: wheel speed (m/s) -> signed PWM. The motors do
+// not turn below MOTOR_MIN_MOVE_PWM, so a non-zero speed is mapped onto
 // [MOTOR_MIN_MOVE_PWM .. 255] instead of [0 .. 255]; otherwise slow
 // commands (search spin, Nav2 fine positioning) only make them hum.
 int wheelSpeedToPwm(float v) {
@@ -293,10 +354,86 @@ int wheelSpeedToPwm(float v) {
   return v >= 0.0f ? (int)pwm : -(int)pwm;
 }
 
-// Differential-drive mixing: twist -> left/right wheel speeds
-void driveWheels(float vL, float vR) {
-  setMotor(1, wheelSpeedToPwm(vL));
-  setMotor(2, wheelSpeedToPwm(vR));
+// Hand the wheels a new speed target (m/s). The motors are driven by
+// updateVelocityControl(), at most VEL_PERIOD_MS later.
+void setWheelTargets(float vL, float vR) {
+  wheelL.target = constrain(vL, -MAX_WHEEL_MPS, MAX_WHEEL_MPS);
+  wheelR.target = constrain(vR, -MAX_WHEEL_MPS, MAX_WHEEL_MPS);
+  velControlActive = true;
+}
+
+// One control step for one wheel: update its measured speed and return
+// the signed PWM to apply.
+int wheelControlStep(WheelCtl& w, long ticks, float dt, uint32_t now) {
+  float raw = (float)(ticks - w.prevTicks) * METERS_PER_TICK / dt;
+  w.prevTicks = ticks;
+  w.measured += VEL_FILTER_ALPHA * (raw - w.measured);
+
+  // A zero target means stop now, not "regulate to zero".
+  if (fabsf(w.target) < MIN_WHEEL_MPS) {
+    w.integral   = 0.0f;
+    w.badSinceMs = 0;
+    return 0;
+  }
+
+  int ff = wheelSpeedToPwm(w.target);
+  if (!VELOCITY_CONTROL_ENABLED || encoderFault) return ff;
+
+  float err = w.target - w.measured;
+  float out = (float)ff + VEL_KP * err + w.integral;
+
+  // Only ever drive in the commanded direction: the loop may ease off
+  // to zero, but it does not reverse the motor to brake.
+  float lo = (w.target > 0.0f) ? 0.0f : -255.0f;
+  float hi = (w.target > 0.0f) ? 255.0f : 0.0f;
+  bool atHi = out >= hi;
+  bool atLo = out <= lo;
+  out = constrain(out, lo, hi);
+
+  // Anti-windup: stop integrating in the direction that is already saturated.
+  if (!(atHi && err > 0.0f) && !(atLo && err < 0.0f)) {
+    w.integral = constrain(w.integral + VEL_KI * err * dt, -255.0f, 255.0f);
+  }
+
+  // Encoder sanity: turning the wrong way, or driven hard and not turning.
+  bool wrongWay = (w.measured * w.target < 0.0f) &&
+                  (fabsf(w.measured) > ENC_FAULT_MIN_MPS);
+  bool noMotion = (fabsf(out) >= (float)ENC_FAULT_PWM) &&
+                  (fabsf(w.measured) < ENC_FAULT_MIN_MPS);
+  if (wrongWay || noMotion) {
+    if (w.badSinceMs == 0) {
+      w.badSinceMs = now ? now : 1;
+    } else if (now - w.badSinceMs > ENC_FAULT_MS) {
+      encoderFault = true;
+      DBG.printf("[vel] ENCODER FAULT (%s) -> open-loop until RESET_FAULT\n",
+                 wrongWay ? "counts opposite to the motor" : "no counts / stalled");
+      return ff;
+    }
+  } else {
+    w.badSinceMs = 0;
+  }
+
+  return (int)out;
+}
+
+// Runs every loop(); steps both wheel controllers at VEL_PERIOD_MS.
+void updateVelocityControl() {
+  uint32_t now = millis();
+  if (now - lastVelMs < VEL_PERIOD_MS) return;
+  float dt = (float)(now - lastVelMs) * 0.001f;
+  lastVelMs = now;
+
+  long t1, t2;
+  readEncoderCounts(t1, t2);
+
+  // Always step, so the measured speeds stay current while the fallback
+  // maneuver or a stop owns the motors.
+  int pwmL = wheelControlStep(wheelL, t1, dt, now);
+  int pwmR = wheelControlStep(wheelR, t2, dt, now);
+  if (!velControlActive) return;
+
+  setMotor(1, pwmL);
+  setMotor(2, pwmR);
 }
 
 // Named helpers used by the fallback maneuver
@@ -429,7 +566,7 @@ void applyTwist(float lin, float ang) {
 
   float vL = lin - ang * (TRACK_WIDTH_M / 2.0f);
   float vR = lin + ang * (TRACK_WIDTH_M / 2.0f);
-  driveWheels(vL, vR);
+  setWheelTargets(vL, vR);
 }
 
 void handleFrame(const ff::Frame& f) {
@@ -451,8 +588,10 @@ void handleFrame(const ff::Frame& f) {
       break;
 
     case ff::MSG_RESET_FAULT:
-      estop     = false;
-      linkFault = false;
+      estop        = false;
+      linkFault    = false;
+      encoderFault = false;
+      wheelL.badSinceMs = wheelR.badSinceMs = 0;
       notePiFrame();
       DBG.printf("[cmd] faults cleared\n");
       sendAck(f.msgId);
@@ -738,6 +877,9 @@ void loop() {
 
   // ---- 3. Fallback maneuver ------------------------------
   fallbackUpdate();
+
+  // ---- 3b. Wheel speed loop (after safety, so a stop wins) -
+  updateVelocityControl();
 
   // ---- 4. Beacon pairing ---------------------------------
   if (pairReplyPending) {

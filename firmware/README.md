@@ -92,7 +92,18 @@ Both sketches must be flashed with matching `pair_message` definitions. The beac
 #### PWM Configuration
 * **Frequency**: 5 kHz
 * **Resolution**: 8-bit (values `0` – `255`)
-* **Default Speed**: `180` (~71% duty cycle)
+* **Default Speed**: `180` (~71% duty cycle), used only by the fallback maneuver
+
+#### Closed-Loop Wheel Speed Control
+In Pi-owned mode each `SET_TWIST` becomes a per-wheel speed target, and a 50 Hz
+feedforward + PI loop on the encoder speed drives the PWM, so slow commands
+(search spin, flame approach, Nav2 fine positioning) are actually achieved.
+
+* **Geometry**: `WHEEL_RADIUS_M` and `ENCODER_TICKS_PER_REV` in the sketch must match `wheel_radius_m` / `ticks_per_rev` in the bridge's `config/bridge.yaml`.
+* **Encoder direction**: each encoder must count **up** when its wheel drives the robot forward; flip `M1_ENC_INVERT` / `M2_ENC_INVERT` if not.
+* **Encoder fault**: if a wheel's encoder counts opposite to its motor, or gives no counts while driven hard, for 0.7 s, both wheels drop back to open-loop feedforward (`[vel] ENCODER FAULT` on the debug serial) until `MSG_RESET_FAULT`.
+* **Tuning**: `VEL_KP`, `VEL_KI` and `MOTOR_MIN_MOVE_PWM` are untuned starting values. `VELOCITY_CONTROL_ENABLED 0` restores open-loop.
+* A zero target stops the motors immediately; the loop never reverses a motor to brake.
 
 ---
 
