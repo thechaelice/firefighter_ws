@@ -3,7 +3,7 @@
 // ESP32 Arduino Core 2.0.x
 //
 // ROLE
-//   * Senses fire and smoke conditions (or simulates them)
+//   * Senses fire (HL-01 IR flame sensor) and smoke (MQ-2)
 //   * Periodically broadcasts/unicasts alert packets to the
 //     mobility controller ESP32 via ESP-NOW
 //
@@ -43,9 +43,28 @@ uint32_t lastSendMs = 0;
 
 
 // ============================================================
+// SENSOR / LED PINS
+// ============================================================
+const int FLAME_PIN = 18;   // HL-01 IR flame sensor, D0
+const int SMOKE_PIN = 19;   // MQ-2 smoke sensor, D0
+const int LED_PIN   = 2;    // alarm LED
+
+// Both modules use an LM393 comparator whose D0 output goes LOW
+// when the threshold (set by the on-board trimmer) is exceeded.
+// Flip these if a module reads the other way round.
+const int FLAME_ACTIVE_LEVEL = LOW;
+const int SMOKE_ACTIVE_LEVEL = LOW;
+
+
+// ============================================================
 // STATE
 // ============================================================
 int messageCounter = 0;
+
+// Detections latched since the last packet, so an event shorter
+// than BEACON_PERIOD_MS is still reported.
+bool fireLatched  = false;
+bool smokeLatched = false;
 
 
 // ============================================================
@@ -71,18 +90,31 @@ void OnDataSent(const uint8_t *mac_addr, esp_now_send_status_t status) {
 // SENSOR ACQUISITION & TRANSMISSION
 // ============================================================
 void readSensors(bool &fire, bool &smoke) {
-  // Currently simulating sensor states.
-  // In real hardware, read digital/analog GPIO pins here.
-  fire = false;
-  smoke = false;
+  fire  = digitalRead(FLAME_PIN) == FLAME_ACTIVE_LEVEL;
+  smoke = digitalRead(SMOKE_PIN) == SMOKE_ACTIVE_LEVEL;
+}
+
+// Poll the sensors, latch any detection for the next packet and
+// drive the alarm LED from the live readings.
+void updateSensors() {
+  bool fire, smoke;
+  readSensors(fire, smoke);
+
+  if (fire)  fireLatched  = true;
+  if (smoke) smokeLatched = true;
+
+  digitalWrite(LED_PIN, (fire || smoke) ? HIGH : LOW);
 }
 
 void sendBeaconPacket() {
   messageCounter++;
   outgoingData.messageNumber = messageCounter;
 
-  // Read current fire/smoke conditions
-  readSensors(outgoingData.fireDetected, outgoingData.smokeDetected);
+  // Report anything detected since the previous packet
+  outgoingData.fireDetected  = fireLatched;
+  outgoingData.smokeDetected = smokeLatched;
+  fireLatched  = false;
+  smokeLatched = false;
 
   Serial.println();
   Serial.println("--------------------------------");
@@ -123,6 +155,13 @@ void setup() {
   Serial.println("================================");
   Serial.println("   ESP32 ESP-NOW BEACON SENDER");
   Serial.println("================================");
+
+  // Sensors + alarm LED. Pull-ups keep a disconnected sensor
+  // reading "no detection" instead of floating.
+  pinMode(FLAME_PIN, INPUT_PULLUP);
+  pinMode(SMOKE_PIN, INPUT_PULLUP);
+  pinMode(LED_PIN, OUTPUT);
+  digitalWrite(LED_PIN, LOW);
 
   // WiFi station mode
   WiFi.mode(WIFI_STA);
@@ -165,6 +204,9 @@ void setup() {
 // ============================================================
 void loop() {
   uint32_t now = millis();
+
+  // ---- Sensors + alarm LED ---------------------------------
+  updateSensors();
 
   // ---- Periodic Beacon Transmission ------------------------
   if (now - lastSendMs >= BEACON_PERIOD_MS) {
