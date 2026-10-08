@@ -65,6 +65,8 @@ class FirefighterBridge(Node):
         self.declare_parameter("wheel_radius_m", 0.0325)
         self.declare_parameter("ticks_per_rev", 1440)
         self.declare_parameter("track_width_m", 0.20)
+        self.declare_parameter("vx_variance", 0.01)
+        self.declare_parameter("vyaw_variance", 0.05)
         self.declare_parameter("beacon_topic", "/beacon_event")
         self.declare_parameter("battery_topic", "/battery")
         self.declare_parameter("diagnostics_topic", "/diagnostics")
@@ -81,6 +83,8 @@ class FirefighterBridge(Node):
         self._wheel_radius = float(gp("wheel_radius_m").value)
         self._ticks_per_rev = int(gp("ticks_per_rev").value)
         self._track_width = float(gp("track_width_m").value)
+        self._vx_variance = float(gp("vx_variance").value)
+        self._vyaw_variance = float(gp("vyaw_variance").value)
         self._esp_timeout_s = float(gp("esp_timeout_s").value)
         cmd_rate = max(1.0, float(gp("cmd_rate_hz").value))
         hb_rate = max(0.1, float(gp("heartbeat_hz").value))
@@ -275,6 +279,13 @@ class FirefighterBridge(Node):
         out.pose.pose.orientation.w = math.cos(self._theta / 2.0)
         out.twist.twist.linear.x = vx
         out.twist.twist.angular.z = vth
+        # Without covariances a fusing EKF takes these velocities as exact.
+        # Row-major 6x6 over (x, y, z, roll, pitch, yaw): [0] = vx, [35] = vyaw.
+        out.twist.covariance[0] = self._vx_variance
+        out.twist.covariance[35] = self._vyaw_variance
+        # The integrated pose drifts without bound: mark it as not to be trusted.
+        for i in (0, 7, 35):
+            out.pose.covariance[i] = 1.0e3
         self._odom_pub.publish(out)
 
         if self._tf_broadcaster is not None:

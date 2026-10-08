@@ -60,6 +60,8 @@ class ThermalReader:
         self._stop = threading.Event()
         self._proc: Optional[subprocess.Popen] = None
         self.restarts = 0
+        #: why the tool last failed to start or stopped, for the caller to report
+        self.last_error: Optional[str] = None
 
     def argv(self) -> List[str]:
         return [self.reader_path, str(self.frame_count), str(self.delay_ms)]
@@ -85,8 +87,9 @@ class ThermalReader:
                     text=True,
                     bufsize=1,
                 )
-            except OSError:
+            except OSError as exc:
                 # reader missing / not executable - wait and retry
+                self.last_error = f"cannot start {self.reader_path}: {exc}"
                 if self._stop.wait(self.restart_delay):
                     return
                 continue
@@ -116,6 +119,9 @@ class ThermalReader:
 
             if self._stop.is_set():
                 return
+
+            code = proc.poll() if proc is not None else None
+            self.last_error = f"{self.reader_path} exited with code {code}"
 
             self.restarts += 1
             # the tool exited on its own: back off briefly, then start it again

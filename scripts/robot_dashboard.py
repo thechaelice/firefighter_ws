@@ -1142,8 +1142,9 @@ def parse_args() -> argparse.Namespace:
                         help="Mission suppressor topic (default: /firefighter_mission/suppress)")
     parser.add_argument("--cmd-vel-topic", default="/cmd_vel",
                         help="Commanded velocity topic (default: /cmd_vel)")
-    parser.add_argument("--goal-topic", default="/goal_pose",
-                        help="Navigation goal topic (default: /goal_pose)")
+    parser.add_argument("--goal-topic", default="/firefighter_mission/goal_pose",
+                        help="Navigation goal topic "
+                             "(default: /firefighter_mission/goal_pose)")
     args, ros_args = parser.parse_known_args()
     if not 1 <= args.port <= 65535:
         parser.error("--port must be between 1 and 65535")

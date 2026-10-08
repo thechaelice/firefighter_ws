@@ -22,6 +22,8 @@ firefighter_bridge:
     wheel_radius_m: 0.0325
     ticks_per_rev: 1440       # 360 CPR x4 quadrature
     track_width_m: 0.20
+    vx_variance: 0.01         # (m/s)^2 on /wheel_odom twist; raise if geometry is unverified
+    vyaw_variance: 0.05       # (rad/s)^2; wheel slip makes yaw rate the weaker of the two
 
     # ---- Events / status -------------------------------------------
     beacon_topic: /beacon_event

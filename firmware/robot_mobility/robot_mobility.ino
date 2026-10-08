@@ -163,6 +163,12 @@ const int MOTOR_DEADBAND = 8;
 
 const float TRACK_WIDTH_M  = 0.20f;   // distance between wheels (m)
 const float MAX_WHEEL_MPS  = 0.50f;   // wheel speed that maps to PWM 255
+const float MIN_WHEEL_MPS  = 0.01f;   // commands below this are treated as stop
+
+// Lowest PWM at which the wheels reliably turn under load. CALIBRATE on the
+// robot (scripts/motor_test.py): raise it if slow commands still only hum,
+// lower it if the slowest motion is too fast.
+const int MOTOR_MIN_MOVE_PWM = 120;
 
 
 // ============================================================
@@ -274,16 +280,23 @@ void stopMotors() {
   motorCmdB = 0;
 }
 
+// Wheel speed (m/s) -> signed PWM. The motors do not turn below
+// MOTOR_MIN_MOVE_PWM, so a non-zero speed is mapped onto
+// [MOTOR_MIN_MOVE_PWM .. 255] instead of [0 .. 255]; otherwise slow
+// commands (search spin, Nav2 fine positioning) only make them hum.
+int wheelSpeedToPwm(float v) {
+  float mag = fabsf(v);
+  if (mag < MIN_WHEEL_MPS) return 0;
+  if (mag > MAX_WHEEL_MPS) mag = MAX_WHEEL_MPS;
+  float pwm = MOTOR_MIN_MOVE_PWM +
+              (mag / MAX_WHEEL_MPS) * (255.0f - MOTOR_MIN_MOVE_PWM);
+  return v >= 0.0f ? (int)pwm : -(int)pwm;
+}
+
 // Differential-drive mixing: twist -> left/right wheel speeds
 void driveWheels(float vL, float vR) {
-  float pwmA = (vL / MAX_WHEEL_MPS) * 255.0f;
-  float pwmB = (vR / MAX_WHEEL_MPS) * 255.0f;
-  if (pwmA >  255.0f) pwmA =  255.0f;
-  if (pwmA < -255.0f) pwmA = -255.0f;
-  if (pwmB >  255.0f) pwmB =  255.0f;
-  if (pwmB < -255.0f) pwmB = -255.0f;
-  setMotor(1, (int)pwmA);
-  setMotor(2, (int)pwmB);
+  setMotor(1, wheelSpeedToPwm(vL));
+  setMotor(2, wheelSpeedToPwm(vR));
 }
 
 // Named helpers used by the fallback maneuver

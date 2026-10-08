@@ -33,7 +33,7 @@ IDLE ──alert──> CONFIRMING ──2nd alert──> NAVIGATING ──reach
 | `~/event` | `String` | in | **manual event injection** for bring-up |
 | `navigate_to_pose` | `nav2_msgs/NavigateToPose` | action | navigation goal (when `use_nav2`) |
 | `~/goal_pose` | `PoseStamped` | out | the goal, published for display |
-| `/cmd_vel` | `Twist` | out | search spin + stop (feeds the bridge) |
+| `/cmd_vel` | `Twist` | out | search spin, flame approach + stop (feeds the bridge) |
 | `~/suppress` | `Bool` | out | extinguisher on/off |
 | `~/state` | `String` | out | current state, on change |
 | `/diagnostics` | `DiagnosticArray` | out | state, attempts, alerting MAC |

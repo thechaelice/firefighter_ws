@@ -7,7 +7,7 @@ firefighter_mission:
     goal_viz_topic: "~/goal_pose"      # out: the goal, published for display only
     use_nav2: true                     # false = publish the goal, wait for a manual event
     nav_action: navigate_to_pose       # Nav2 NavigateToPose action server name
-    cmd_vel_topic: /cmd_vel            # out: search spin + stop (feeds the bridge)
+    cmd_vel_topic: /cmd_vel            # out: search spin, approach + stop (feeds the bridge)
     suppress_topic: "~/suppress"       # out: Bool, extinguisher on/off
     state_topic: "~/state"             # out: String, current FSM state
     event_topic: "~/event"             # in:  String, manual event injection
@@ -22,6 +22,12 @@ firefighter_mission:
 
     # ---- behaviour --------------------------------------------------
     search_spin_rate: 0.5              # rad/s sweep while SEARCHING
+    approach_speed: 0.15               # m/s creep toward the flame while APPROACHING
+    approach_turn_gain: 1.5            # rad/s of turn per rad of flame bearing
+    approach_max_turn_rate: 0.8        # rad/s cap on that turn
+    approach_align_rad: 0.25           # only drive forward once the bearing is inside this
+    flame_stale_s: 1.0                 # hold still if the flame was last seen longer ago
+    flame_lost_frames: 3               # consecutive FLAME_LOST frames before acting on it
     tick_rate_hz: 10.0
 
     # ---- FSM timings ------------------------------------------------

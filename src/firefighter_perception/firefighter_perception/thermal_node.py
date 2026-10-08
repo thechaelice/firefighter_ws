@@ -172,15 +172,21 @@ class ThermalPerception(Node):
             self.get_logger().error(f"thermal reader stopped: {exc}")
 
     def _check_reader_staleness(self) -> None:
-        """Complain once when the reader stops producing frames."""
+        """Complain once when the reader produces no frames (or never did)."""
+        if self._reader is None:
+            return                      # already reported: reader_path is empty
         if self._last_frame_stamp is None:
             self._last_frame_stamp = self.get_clock().now()
             return
         silent = (self.get_clock().now() - self._last_frame_stamp).nanoseconds * 1e-9
         if silent > self._stale_after_s and not self._stale_warned:
             self._stale_warned = True
-            self.get_logger().warn(
-                f"no new thermal frames for {silent:.1f}s - is the sensor still there?"
+            reason = self._reader.last_error or "the reader is running but silent"
+            self.get_logger().error(
+                f"no thermal frames for {silent:.1f}s ({reason}; "
+                f"{self._reader.restarts} restarts) - no flame events are being "
+                "published. Is the sensor connected and the reader built "
+                "(bash scripts/thermal/build.sh)?"
             )
 
     def _on_scan(self, msg: LaserScan) -> None:
@@ -190,6 +196,7 @@ class ThermalPerception(Node):
     def _on_timer(self) -> None:
         frame = self._latest_frame
         if frame is None:
+            self._check_reader_staleness()   # a reader that never delivers must not be silent
             return
 
         # Publish only on a NEW frame. Re-publishing the last one at the timer

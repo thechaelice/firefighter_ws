@@ -78,6 +78,12 @@ class MissionNode(Node):
 
         # ---- behaviour -------------------------------------------------
         self.declare_parameter("search_spin_rate", 0.5)
+        self.declare_parameter("approach_speed", 0.15)
+        self.declare_parameter("approach_turn_gain", 1.5)
+        self.declare_parameter("approach_max_turn_rate", 0.8)
+        self.declare_parameter("approach_align_rad", 0.25)
+        self.declare_parameter("flame_stale_s", 1.0)
+        self.declare_parameter("flame_lost_frames", 3)
         self.declare_parameter("tick_rate_hz", 10.0)
 
         # ---- FSM timings ------------------------------------------------
@@ -94,8 +100,19 @@ class MissionNode(Node):
         gp = self.get_parameter
         self._goal_frame = gp("goal_frame").value
         self._search_spin_rate = float(gp("search_spin_rate").value)
+        self._approach_speed = float(gp("approach_speed").value)
+        self._approach_turn_gain = float(gp("approach_turn_gain").value)
+        self._approach_max_turn = abs(float(gp("approach_max_turn_rate").value))
+        self._approach_align_rad = abs(float(gp("approach_align_rad").value))
+        self._flame_stale_s = float(gp("flame_stale_s").value)
+        self._flame_lost_frames = max(1, int(gp("flame_lost_frames").value))
         self._beacon_goals = self._load_goals(gp("beacon_goals_file").value)
         self._last_alert_mac = ""
+
+        # ---- flame tracking ----------------------------------------------
+        self._flame_bearing = 0.0        # last reported bearing (+left), rad
+        self._flame_seen_at = None       # time of the last FOUND / IN_RANGE
+        self._lost_streak = 0            # consecutive FLAME_LOST frames
 
         self._fsm = MissionFSM(
             MissionConfig(
@@ -137,6 +154,9 @@ class MissionNode(Node):
         # ---- navigation ----------------------------------------------------
         self._use_nav2 = bool(gp("use_nav2").value)
         self._nav_handle = None
+        self._nav_seq = 0                # bumped per request/cancel; stale callbacks are ignored
+        self._nav_pending = None         # goal waiting for the action server to appear
+        self._nav_wait_warned = False
         self._nav_client = (
             ActionClient(self, NavigateToPose, gp("nav_action").value)
             if self._use_nav2
@@ -176,17 +196,15 @@ class MissionNode(Node):
 
     def _on_flame(self, msg: FlameEvent) -> None:
         state = msg.state
-        if state == FlameEvent.IN_SUPPRESSION_RANGE:
-            self._dispatch(Event.IN_RANGE)
-        elif state == FlameEvent.FLAME_EXTINGUISHED:
-            self._dispatch(Event.FLAME_EXTINGUISHED)
-        elif state == FlameEvent.FLAME_FOUND:
-            # "found" during verification means it never actually went out
-            if self._fsm.state is State.VERIFYING:
-                self._dispatch(Event.FLAME_STILL_PRESENT)
-            else:
-                self._dispatch(Event.FLAME_FOUND)
-        elif state == FlameEvent.FLAME_LOST:
+
+        if state == FlameEvent.FLAME_LOST:
+            # Perception emits FLAME_LOST for every frame without a hot pixel, so
+            # one frame proves nothing (noise, spray in front of the sensor).
+            # Act only on `flame_lost_frames` in a row.
+            self._lost_streak += 1
+            if self._lost_streak < self._flame_lost_frames:
+                return
+            self._lost_streak = 0
             # Perception reports what it sees, not what it means: losing sight of
             # the flame while suppressing or verifying is how "it went out"
             # arrives. Anywhere else it is just a lost track.
@@ -194,6 +212,24 @@ class MissionNode(Node):
                 self._dispatch(Event.FLAME_EXTINGUISHED)
             else:
                 self._dispatch(Event.FLAME_LOST)
+            return
+
+        self._lost_streak = 0
+        seen = state in (FlameEvent.FLAME_FOUND, FlameEvent.IN_SUPPRESSION_RANGE)
+        if seen:
+            self._flame_bearing = float(msg.bearing_rad)
+            self._flame_seen_at = self._now()
+
+        if state == FlameEvent.FLAME_EXTINGUISHED:
+            self._dispatch(Event.FLAME_EXTINGUISHED)
+        elif seen and self._fsm.state is State.VERIFYING:
+            # still visible during verification (in range or not) means it never
+            # actually went out
+            self._dispatch(Event.FLAME_STILL_PRESENT)
+        elif state == FlameEvent.IN_SUPPRESSION_RANGE:
+            self._dispatch(Event.IN_RANGE)
+        elif state == FlameEvent.FLAME_FOUND:
+            self._dispatch(Event.FLAME_FOUND)
 
     def _on_manual_event(self, msg: String) -> None:
         name = msg.data.strip().lower()
@@ -223,9 +259,37 @@ class MissionNode(Node):
     # ------------------------------------------------------------------
     def _on_tick(self) -> None:
         self._run(self._fsm.update(self._now()))
+        # a goal requested before Nav2 was up goes out as soon as it is
+        if self._nav_pending is not None:
+            self._send_pending_goal()
         # continuous sweep while searching for the flame
         if self._fsm.state is State.SEARCHING:
             self._publish_cmd_vel(self._search_spin_rate)
+        elif self._fsm.state is State.APPROACHING:
+            self._drive_approach()
+
+    def _drive_approach(self) -> None:
+        """Close on the flame: turn to its bearing, then creep forward.
+
+        Perception turns this into IN_RANGE once the LiDAR range at that bearing
+        drops under its suppression range. With no fresh sighting the robot holds
+        still rather than driving on a stale bearing.
+        """
+        fresh = (
+            self._flame_seen_at is not None
+            and self._now() - self._flame_seen_at <= self._flame_stale_s
+        )
+        if not fresh:
+            self._publish_cmd_vel(0.0)
+            return
+
+        bearing = self._flame_bearing
+        turn = max(
+            -self._approach_max_turn,
+            min(self._approach_max_turn, self._approach_turn_gain * bearing),
+        )
+        aligned = abs(bearing) <= self._approach_align_rad
+        self._publish_cmd_vel(turn, self._approach_speed if aligned else 0.0)
 
     # ------------------------------------------------------------------
     # Outputs
@@ -250,6 +314,7 @@ class MissionNode(Node):
             elif action is Action.START_APPROACH:
                 self.get_logger().info("approaching the flame")
             elif action is Action.START_SUPPRESS:
+                self._publish_cmd_vel(0.0)      # the approach may still be driving
                 self._suppress_pub.publish(Bool(data=True))
                 self.get_logger().warn(f"suppressing (attempt {self._fsm.attempts})")
             elif action is Action.STOP_SUPPRESS:
@@ -259,8 +324,9 @@ class MissionNode(Node):
             self._publish_state()
             self._publish_diagnostics()
 
-    def _publish_cmd_vel(self, angular_z: float) -> None:
+    def _publish_cmd_vel(self, angular_z: float, linear_x: float = 0.0) -> None:
         msg = Twist()
+        msg.linear.x = linear_x
         msg.angular.z = angular_z
         self._cmd_vel_pub.publish(msg)
 
@@ -336,15 +402,49 @@ class MissionNode(Node):
 
         goal = NavigateToPose.Goal()
         goal.pose = pose
+        self._nav_seq += 1
         self._nav_handle = None
-        self._nav_client.send_goal_async(goal).add_done_callback(self._on_goal_response)
+        self._nav_pending = goal
+        self._nav_wait_warned = False
+        self._send_pending_goal()
 
-    def _on_goal_response(self, future) -> None:
+    def _send_pending_goal(self) -> None:
+        """Send the waiting goal once the action server exists.
+
+        A goal sent to a server that is not up yet is silently lost, so it is held
+        here and retried from the tick. The FSM's nav timeout still bounds the wait.
+        """
+        if self._nav_pending is None or self._nav_client is None:
+            return
+        if not self._nav_client.server_is_ready():
+            if not self._nav_wait_warned:
+                self._nav_wait_warned = True
+                self.get_logger().warn(
+                    "Nav2 action server is not available yet - the goal will be "
+                    "sent when it appears (is Nav2 running and active?)"
+                )
+            return
+
+        goal, self._nav_pending = self._nav_pending, None
+        seq = self._nav_seq
+        self._nav_client.send_goal_async(goal).add_done_callback(
+            lambda future, seq=seq: self._on_goal_response(future, seq)
+        )
+
+    def _on_goal_response(self, future, seq: int) -> None:
         try:
             handle = future.result()
         except Exception as exc:  # noqa: BLE001 - a failed future must not kill us
             self.get_logger().error(f"navigation goal failed to send: {exc}")
-            self._dispatch(Event.NAV_GOAL_FAILED)
+            if seq == self._nav_seq:
+                self._dispatch(Event.NAV_GOAL_FAILED)
+            return
+
+        if seq != self._nav_seq:
+            # cancelled (or replaced) before Nav2 answered: do not let it run
+            if handle is not None and handle.accepted:
+                handle.cancel_goal_async()
+                self.get_logger().info("navigation cancelled (goal accepted late)")
             return
 
         if handle is None or not handle.accepted:
@@ -353,9 +453,13 @@ class MissionNode(Node):
             return
 
         self._nav_handle = handle
-        handle.get_result_async().add_done_callback(self._on_nav_result)
+        handle.get_result_async().add_done_callback(
+            lambda future, seq=seq: self._on_nav_result(future, seq)
+        )
 
-    def _on_nav_result(self, future) -> None:
+    def _on_nav_result(self, future, seq: int) -> None:
+        if seq != self._nav_seq:
+            return                      # result of a goal we already gave up on
         self._nav_handle = None
         try:
             status = future.result().status
@@ -371,9 +475,14 @@ class MissionNode(Node):
             self._dispatch(Event.NAV_GOAL_FAILED)
 
     def _cancel_navigation(self) -> None:
+        # Bumping the sequence invalidates every outstanding callback, including a
+        # goal Nav2 has not accepted yet (it is cancelled when the answer arrives).
+        self._nav_seq += 1
+        pending, self._nav_pending = self._nav_pending, None
         handle, self._nav_handle = self._nav_handle, None
         if handle is not None:
             handle.cancel_goal_async()
+        if handle is not None or pending is not None:
             self.get_logger().info("navigation cancelled")
 
     def _load_goals(self, path: str):

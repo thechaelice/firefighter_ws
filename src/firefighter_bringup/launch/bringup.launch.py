@@ -129,7 +129,11 @@ def generate_launch_description():
 
     localization_include = _include(
         "nav2_bringup", "localization_launch.py",
-        {"map": map_file, "use_sim_time": use_sim_time},
+        {
+            "map": map_file,
+            "params_file": cfg("nav2_params.yaml"),   # else AMCL uses base_footprint
+            "use_sim_time": use_sim_time,
+        },
     )
     localization = TimerAction(
         period=startup_delay,
@@ -151,7 +155,11 @@ def generate_launch_description():
         condition=IfCondition(LaunchConfiguration("nav2_enabled")),
     )
 
-    mission = _include("firefighter_mission", "mission.launch.py", {})
+    # Without Nav2 there is no action server to send the goal to.
+    mission = _include(
+        "firefighter_mission", "mission.launch.py",
+        {"use_nav2": LaunchConfiguration("nav2_enabled")},
+    )
 
     rviz = Node(
         package="rviz2",
