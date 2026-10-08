@@ -62,12 +62,14 @@ FLAG_LINK_OK = 1 << 0
 FLAG_ESTOP = 1 << 1
 FLAG_MOVING = 1 << 2
 FLAG_FALLBACK = 1 << 3
+FLAG_ENC_FAULT = 1 << 4
 
 FLAG_NAMES = {
     FLAG_LINK_OK: "link_ok",
     FLAG_ESTOP: "estop",
     FLAG_MOVING: "moving",
     FLAG_FALLBACK: "fallback",
+    FLAG_ENC_FAULT: "encoder_fault",
 }
 
 MODE_PI = 0
@@ -246,6 +248,10 @@ class Status:
     @property
     def moving(self) -> bool:
         return bool(self.flags & FLAG_MOVING)
+
+    @property
+    def encoder_fault(self) -> bool:
+        return bool(self.flags & FLAG_ENC_FAULT)
 
     @property
     def flags_set(self) -> List[str]:

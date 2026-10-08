@@ -198,6 +198,17 @@ def test_unpack_status_flags_and_mode():
     assert status.flags_set == ["link_ok", "moving"]
 
 
+def test_unpack_status_encoder_fault_flag():
+    clear = p.unpack_status(struct.pack("<HBB", 0, p.FLAG_LINK_OK, p.MODE_PI))
+    assert not clear.encoder_fault
+
+    faulted = p.unpack_status(
+        struct.pack("<HBB", 0, p.FLAG_LINK_OK | p.FLAG_ENC_FAULT, p.MODE_PI)
+    )
+    assert faulted.encoder_fault
+    assert faulted.flags_set == ["link_ok", "encoder_fault"]
+
+
 def test_unpack_beacon_event():
     event = p.unpack_beacon_event(
         struct.pack("<IBBB", 7, 1, 1, 0) + bytes(range(1, 7))

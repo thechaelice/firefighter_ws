@@ -504,6 +504,7 @@ void sendStatus() {
   if (estop)                              flags |= ff::FLAG_ESTOP;
   if (motorCmdA > 0 || motorCmdB > 0)     flags |= ff::FLAG_MOVING;
   if (!MOTION_OWNER_IS_PI)                flags |= ff::FLAG_FALLBACK;
+  if (encoderFault)                       flags |= ff::FLAG_ENC_FAULT;
 
   uint8_t p[4];
   ff::put_u16(p,     0);          // vbat_mV: no battery ADC yet

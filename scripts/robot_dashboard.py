@@ -542,6 +542,7 @@ class RobotDashboard(Node):
             "mode": values.get("mode"),
             "link_ok": as_bool("link_ok"),
             "estop": as_bool("estop"),
+            "encoder_fault": as_bool("encoder_fault"),
             "flags": values.get("flags"),
             "mobility_moving": "moving" in entry["message"],
             "vbat_v": (vbat_mv / 1000.0) if vbat_mv else None,
@@ -907,6 +908,7 @@ PAGE = r"""<!doctype html>
         badge(e.link_ok ? 'link ok' : 'link down', linkKind) +
         badge(`mode: ${e.mode ?? '?'}`, e.mode === 'pi' ? 'info' : 'warn') +
         (e.estop ? badge('E-STOP LATCHED', 'alert') : badge('e-stop clear', 'idle')) +
+        (e.encoder_fault ? badge('ENCODER FAULT', 'alert') : '') +
         (e.mobility_moving ? badge('moving', 'info') : badge('stopped', 'idle'));
       $('espHint').textContent = `diag ${e.level_name} · ${fmtAge(e.age)} ago`;
       $('espKv').innerHTML = kv([

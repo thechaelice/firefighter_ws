@@ -101,7 +101,7 @@ feedforward + PI loop on the encoder speed drives the PWM, so slow commands
 
 * **Geometry**: `WHEEL_RADIUS_M` and `ENCODER_TICKS_PER_REV` in the sketch must match `wheel_radius_m` / `ticks_per_rev` in the bridge's `config/bridge.yaml`.
 * **Encoder direction**: each encoder must count **up** when its wheel drives the robot forward; flip `M1_ENC_INVERT` / `M2_ENC_INVERT` if not.
-* **Encoder fault**: if a wheel's encoder counts opposite to its motor, or gives no counts while driven hard, for 0.7 s, both wheels drop back to open-loop feedforward (`[vel] ENCODER FAULT` on the debug serial) until `MSG_RESET_FAULT`.
+* **Encoder fault**: if a wheel's encoder counts opposite to its motor, or gives no counts while driven hard, for 0.7 s, both wheels drop back to open-loop feedforward until `MSG_RESET_FAULT`. It is reported to the Pi as `FLAG_ENC_FAULT` (bit 4) in `MSG_STATUS`, which the bridge raises as an ERROR on `/diagnostics`, and printed as `[vel] ENCODER FAULT` on the debug serial.
 * **Tuning**: `VEL_KP`, `VEL_KI` and `MOTOR_MIN_MOVE_PWM` are untuned starting values. `VELOCITY_CONTROL_ENABLED 0` restores open-loop.
 * A zero target stops the motors immediately; the loop never reverses a motor to brake.
 

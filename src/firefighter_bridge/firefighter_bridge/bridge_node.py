@@ -96,6 +96,7 @@ class FirefighterBridge(Node):
         self._y = 0.0
         self._theta = 0.0
         self._prev_ticks = None
+        self._encoder_fault = False     # last ENC_FAULT flag seen in STATUS
         self._last_odom_time = None
 
         # ---- command state ---------------------------------------------
@@ -311,13 +312,30 @@ class FirefighterBridge(Node):
         battery.present = True
         self._battery_pub.publish(battery)
 
+        # Log the encoder fault on change only; STATUS arrives at 5 Hz.
+        if status.encoder_fault != self._encoder_fault:
+            self._encoder_fault = status.encoder_fault
+            if status.encoder_fault:
+                self.get_logger().error(
+                    "mobility ESP32 reports an ENCODER FAULT: wheel speed control is "
+                    "off and the wheels are running open-loop. Check the encoder "
+                    "wiring / M*_ENC_INVERT, then clear it with ~/clear_fault."
+                )
+            else:
+                self.get_logger().info("mobility ESP32 encoder fault cleared")
+
         mode = "pi" if status.mode == protocol.MODE_PI else "fallback"
         diag = DiagnosticArray()
         diag.header.stamp = now.to_msg()
         entry = DiagnosticStatus()
         entry.name = "firefighter_bridge: mobility esp32"
         entry.hardware_id = "mobility_esp32"
-        entry.level = DiagnosticStatus.OK if status.link_ok else DiagnosticStatus.WARN
+        if status.encoder_fault:
+            entry.level = DiagnosticStatus.ERROR
+        elif status.link_ok:
+            entry.level = DiagnosticStatus.OK
+        else:
+            entry.level = DiagnosticStatus.WARN
         entry.message = f"mode={mode} flags={','.join(status.flags_set) or 'none'}"
         entry.values = [
             KeyValue(key="vbat_mv", value=str(status.vbat_mv)),
@@ -325,6 +343,7 @@ class FirefighterBridge(Node):
             KeyValue(key="flags", value=str(status.flags)),
             KeyValue(key="link_ok", value=str(status.link_ok)),
             KeyValue(key="estop", value=str(status.estop)),
+            KeyValue(key="encoder_fault", value=str(status.encoder_fault)),
         ]
         diag.status.append(entry)
         self._diag_pub.publish(diag)

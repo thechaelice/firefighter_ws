@@ -59,6 +59,7 @@ enum StatusFlags : uint8_t {
   FLAG_ESTOP    = 1 << 1,  // stop latched by MSG_ESTOP
   FLAG_MOVING   = 1 << 2,  // at least one motor is energised
   FLAG_FALLBACK = 1 << 3,  // running the on-board fixed maneuver
+  FLAG_ENC_FAULT = 1 << 4, // wheel speed loop disabled: an encoder disagrees with its motor
 };
 
 // ------------------------------------------------------------
