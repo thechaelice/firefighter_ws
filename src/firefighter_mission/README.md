@@ -29,9 +29,10 @@ IDLE ──alert──> CONFIRMING ──2nd alert──> NAVIGATING ──reach
 | Name | Type | Dir | Notes |
 |---|---|---|---|
 | `/beacon_event` | `BeaconEvent` | in | alert only when `fire && smoke` |
-| `/flame_event` | `FlameEvent` | in | from `firefighter_perception` (later) |
+| `/flame_event` | `FlameEvent` | in | from `firefighter_perception` |
 | `~/event` | `String` | in | **manual event injection** for bring-up |
-| `/goal_pose` | `PoseStamped` | out | navigation target |
+| `navigate_to_pose` | `nav2_msgs/NavigateToPose` | action | navigation goal (when `use_nav2`) |
+| `~/goal_pose` | `PoseStamped` | out | the goal, published for display |
 | `/cmd_vel` | `Twist` | out | search spin + stop (feeds the bridge) |
 | `~/suppress` | `Bool` | out | extinguisher on/off |
 | `~/state` | `String` | out | current state, on change |
@@ -47,9 +48,9 @@ ros2 launch firefighter_mission mission.launch.py
 
 ## Bring-up without Nav2 or a thermal camera
 
-Navigation is delegated: the node publishes `/goal_pose` and waits for the
-`NAV_GOAL_REACHED` event. Until Nav2 and perception exist, drive the whole mission
-by hand:
+With `use_nav2:=false` (or simply no Nav2 running) the node only publishes the goal
+for display and waits for a `NAV_GOAL_REACHED` event, so the whole mission can be
+driven by hand:
 
 ```bash
 ros2 topic pub --once /firefighter_mission/event std_msgs/String "{data: nav_goal_reached}"
@@ -61,6 +62,6 @@ ros2 topic echo /firefighter_mission/state
 
 Valid event names are exactly the `Event` enum values in `mission_fsm.py`.
 
-When Nav2 lands, replace the `/goal_pose` publish with a `nav2_msgs`
-`NavigateToPose` action client and feed arrival/abort back as the same events — the
-FSM itself does not change.
+Nav2 is now wired in: the goal goes out through the `navigate_to_pose` action and
+arrival/abort come back as the same events. `use_nav2:=false` restores the manual
+path above. The FSM itself never learned that Nav2 exists.

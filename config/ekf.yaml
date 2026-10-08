@@ -1,0 +1,48 @@
+# robot_localization EKF - fuses the two planar odometry sources into a single
+# odom -> base_link transform (REP-105) and publishes /odometry/filtered.
+#
+#   /odom_rf2o   rf2o laser scan matching  -> absolute planar pose (x, y, yaw)
+#   /wheel_odom  mobility ESP32 encoders    -> body velocities (vx, vyaw)
+#
+# Fusing a pose source *and* a velocity source is the standard split: the
+# velocities carry the state forward between scan corrections, and the pose keeps
+# it from drifting. There is no IMU on this robot, hence no imu0.
+#
+# CAUTION: /wheel_odom is only as good as the wheel geometry in the bridge's
+# config/bridge.yaml (wheel_radius_m, ticks_per_rev, track_width_m). Those are
+# still unverified - a wrong value will drag the fused estimate around, so check
+# them before trusting the output.
+ekf_filter_node:
+  ros__parameters:
+    frequency: 30.0
+    sensor_timeout: 0.2
+    two_d_mode: true          # planar robot: ignore z, roll and pitch
+    publish_tf: true          # this node owns odom -> base_link
+    print_diagnostics: true
+
+    map_frame: map
+    odom_frame: odom
+    base_link_frame: base_link
+    world_frame: odom         # odometry-only fusion, so the output frame is odom
+
+    # ---- odom0: rf2o laser odometry (absolute planar pose) -------------
+    odom0: /odom_rf2o
+    odom0_config: [true,  true,  false,   # x, y, z
+                   false, false, true,    # roll, pitch, yaw
+                   false, false, false,   # vx, vy, vz
+                   false, false, false,   # vroll, vpitch, vyaw
+                   false, false, false]   # ax, ay, az
+    odom0_differential: false
+    odom0_relative: false
+    odom0_queue_size: 10
+
+    # ---- odom1: wheel encoders (body velocities) -----------------------
+    odom1: /wheel_odom
+    odom1_config: [false, false, false,
+                   false, false, false,
+                   true,  false, false,   # vx
+                   false, false, true,    # vyaw
+                   false, false, false]
+    odom1_differential: false
+    odom1_relative: false
+    odom1_queue_size: 10

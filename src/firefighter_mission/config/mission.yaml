@@ -4,7 +4,9 @@ firefighter_mission:
     # ---- topics -----------------------------------------------------
     beacon_topic: /beacon_event        # in:  from firefighter_bridge
     flame_topic: /flame_event          # in:  from firefighter_perception (later)
-    goal_topic: /goal_pose             # out: navigation target
+    goal_viz_topic: "~/goal_pose"      # out: the goal, published for display only
+    use_nav2: true                     # false = publish the goal, wait for a manual event
+    nav_action: navigate_to_pose       # Nav2 NavigateToPose action server name
     cmd_vel_topic: /cmd_vel            # out: search spin + stop (feeds the bridge)
     suppress_topic: "~/suppress"       # out: Bool, extinguisher on/off
     state_topic: "~/state"             # out: String, current FSM state

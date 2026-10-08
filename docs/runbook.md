@@ -196,3 +196,54 @@ rviz2 -d $(ros2 pkg prefix sllidar_ros2)/share/sllidar_ros2/rviz/sllidar_ros2.rv
 - **No `/dev/ttyUSB*`** — check the USB cable/power; `lsusb` should show a `CP210x` / `CH340` / `FTDI` device.
 - **Node runs but no scan** — call `/start_motor` (see §4).
 - **Scan freezes after a while** — the motor has stalled; call `/start_motor` again, or power the LiDAR from a powered USB hub.
+
+---
+
+## 7. Full stack (SLAM + Nav2 + mission)
+
+The whole robot comes up from one launch file:
+
+```bash
+cd ~/firefighter_ws && ./build.sh && source install/setup.bash
+ros2 launch firefighter_bringup bringup.launch.py
+```
+
+That starts the LiDAR, `rf2o`, the `robot_localization` EKF, the ESP32 bridge,
+thermal perception, SLAM Toolbox, Nav2, the mission FSM and RViz. See
+[`src/firefighter_bringup/README.md`](../src/firefighter_bringup/README.md) for the
+full argument list and the TF-ownership diagram.
+
+```bash
+# mapping only, no Nav2
+ros2 launch firefighter_bringup bringup.launch.py nav2_enabled:=false
+
+# save the map once you have driven around
+ros2 run nav2_map_server map_saver_cli -f ~/firefighter_ws/maps/map
+
+# later: localize against the saved map instead of mapping
+ros2 launch firefighter_bringup bringup.launch.py slam:=false
+```
+
+### TF ownership
+
+Exactly one node publishes each transform. This is the thing that most often goes
+wrong:
+
+```
+map ──(slam_toolbox)──> odom ──(EKF)──> base_link ──(static)──> laser
+                                                └──(static)──> thermal_camera
+```
+
+`rf2o` and the bridge both publish odometry with `publish_tf: false` precisely so
+the EKF can own `odom → base_link`. Running the old `rf2o_laser_odometry.launch.py`
+(which defaults to `publish_tf: true`) **alongside** the bringup file will give
+`base_link` two parents — check `ros2 node list` if TF looks unstable.
+
+### Checking it is healthy
+
+```bash
+ros2 run tf2_tools view_frames          # one parent per frame
+ros2 topic hz /scan /odometry/filtered /thermal/image
+ros2 lifecycle get /slam_toolbox /controller_server /planner_server
+ros2 topic echo /firefighter_mission/state
+```

@@ -1,0 +1,35 @@
+<?xml version="1.0"?>
+<?xml-model href="http://download.ros.org/schema/package_format3.xsd" schematypens="http://www.w3.org/2001/XMLSchema"?>
+<package format="3">
+  <name>firefighter_bringup</name>
+  <version>0.1.0</version>
+  <description>
+    Single entry point for the whole firefighter robot: LiDAR, laser odometry,
+    EKF, ESP32 bridge, thermal perception, SLAM Toolbox, Nav2 and the mission FSM.
+  </description>
+  <maintainer email="thechalice22@gmail.com">thechaelice</maintainer>
+  <license>TODO: License declaration</license>
+
+  <buildtool_depend>ament_cmake</buildtool_depend>
+
+  <exec_depend>launch</exec_depend>
+  <exec_depend>launch_ros</exec_depend>
+  <exec_depend>rviz2</exec_depend>
+  <exec_depend>tf2_ros</exec_depend>
+
+  <exec_depend>sllidar_ros2</exec_depend>
+  <exec_depend>rf2o_laser_odometry</exec_depend>
+  <exec_depend>robot_localization</exec_depend>
+  <exec_depend>slam_toolbox</exec_depend>
+  <exec_depend>nav2_bringup</exec_depend>
+  <exec_depend>nav2_msgs</exec_depend>
+
+  <exec_depend>firefighter_interfaces</exec_depend>
+  <exec_depend>firefighter_bridge</exec_depend>
+  <exec_depend>firefighter_perception</exec_depend>
+  <exec_depend>firefighter_mission</exec_depend>
+
+  <export>
+    <build_type>ament_cmake</build_type>
+  </export>
+</package>

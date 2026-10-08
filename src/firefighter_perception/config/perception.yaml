@@ -1,0 +1,26 @@
+# Parameters for firefighter_perception/thermal_node.
+#
+# reader_path is NOT set here - it is an absolute path to the repo's
+# scripts/thermal/mlx90641_frames and is supplied by the launch file (override it
+# with reader_path:=...). See docs/thermal-camera.md for why the reader is a C tool.
+
+firefighter_perception:
+  ros__parameters:
+    # ---- acquisition -------------------------------------------------
+    delay_ms: 200                 # frame period asked of the reader (~5 Hz)
+    publish_rate_hz: 5.0
+
+    # ---- detection ---------------------------------------------------
+    fov_h_deg: 55.0               # 55x35 lens variant; use 110.0 for the wide one
+    threshold_c: 60.0             # absolute "this is hot" bar
+    delta_c: 20.0                 # ...or this far above ambient, whichever is lower
+    use_frame_mean_ambient: true  # ambient := mean of the frame
+    ambient_c: 25.0               # used only when use_frame_mean_ambient is false
+    suppression_range_m: 1.0      # LiDAR range at which the extinguisher is in reach
+
+    # ---- topics ------------------------------------------------------
+    image_topic: /thermal/image
+    camera_info_topic: /thermal/camera_info
+    flame_topic: /flame_event
+    scan_topic: /scan
+    frame_id: thermal_camera      # must match the static TF in firefighter_bringup

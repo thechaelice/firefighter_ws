@@ -69,10 +69,10 @@ The robot is built with a dual-controller architecture:
 | **Thermal Frame Capture/Render** | `scripts/thermal_frames.py` + `scripts/thermal/` | ✅ Implemented | Captures Melexis **MLX90641** frames and renders PNG heat maps (see [`docs/thermal-camera.md`](docs/thermal-camera.md)) |
 | **Pi ↔ ESP32 Serial Bridge** | `firefighter_bridge` (ament_python) | ✅ Implemented | Framed UART link: `/cmd_vel` → `SET_TWIST`, wheel odom, beacon events (see [`src/firefighter_bridge/`](src/firefighter_bridge/README.md)) |
 | **Mission Behaviour FSM** | `firefighter_mission` (ament_python) | ✅ Implemented | `beacon → navigate → search → suppress → verify` state machine, e-stop, bounded timeouts (see [`src/firefighter_mission/`](src/firefighter_mission/README.md)) |
-| **ESP-NOW Fire Beacon** | ESP32 + Smoke/Heat Sensor | 🚧 Planned / In Development | Sensor trigger and wireless alert transmission (see [`firmware/`](firmware/README.md)) |
+| **ESP-NOW Fire Beacon** | ESP32 + Flame/Smoke Sensors | ✅ Implemented | HL-01 flame + MQ-2 smoke sensing with detection latching, non-blocking 2 s ESP-NOW alert transmission (see [`firmware/`](firmware/README.md)) |
 | **Robot Mobility Controller** | ESP32 + Motor Drivers | ✅ In Firmware | Motor control firmware and ESP-NOW receiver (see [`firmware/`](firmware/README.md)) |
-| **SLAM & Path Planning** | Nav2 / SLAM Toolbox | 🚧 In Progress | Autonomous navigation and dynamic obstacle avoidance |
-| **Thermal Flame Localization**| Melexis **MLX90641** (16 × 12) + ML model | 🚧 In Progress | Sensor identified & read verified (see [`docs/thermal-camera.md`](docs/thermal-camera.md)); perception & ML pending |
+| **SLAM & Path Planning** | `slam_toolbox` + Nav2 + `robot_localization` | ✅ Implemented | Mapping, EKF fusion (`/odom_rf2o` + `/wheel_odom`) and Nav2 path planning (see [`src/firefighter_bringup/`](src/firefighter_bringup/README.md)) |
+| **Thermal Flame Localization**| Melexis **MLX90641** (16 × 12) + ML model | ✅ Implemented | 16×12 IR array → thermal image + bearing/range to the flame (see [`src/firefighter_perception/`](src/firefighter_perception/README.md)); ML model still pending |
 | **Fire Retardant Dispenser** | Actuator / Pump / Nozzle | ⏳ Planned | Automated fire suppression dispenser |
 
 ### Upstream ROS 2 Packages

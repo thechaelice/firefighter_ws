@@ -7,20 +7,23 @@ Adapters
     ~/estop, ~/reset (Trigger)    -> ESTOP / RESET
 
 Actuators
-    /goal_pose       (PoseStamped) navigation target
-    /cmd_vel         (Twist)       search spin, and stop
-    ~/suppress       (Bool)        extinguisher on/off
-    ~/state          (String)      current FSM state, published on change
-    /diagnostics     (DiagnosticArray)
+    navigate_to_pose  (nav2_msgs/NavigateToPose) navigation goal, when use_nav2
+    ~/goal_pose       (PoseStamped)              the goal, published for display
+    /cmd_vel          (Twist)                    search spin, and stop
+    ~/suppress        (Bool)                     extinguisher on/off
+    ~/state           (String)                   current FSM state, on change
+    /diagnostics      (DiagnosticArray)
 
-Navigation is delegated: the node publishes ``/goal_pose`` and waits for
-``NAV_GOAL_REACHED``.  Until Nav2 is wired up, drive it during bring-up with::
+Navigation is delegated to Nav2 through the ``navigate_to_pose`` action.  Goal
+success/abort is fed back into the FSM as NAV_GOAL_REACHED / NAV_GOAL_FAILED, so
+the FSM does not know Nav2 exists.
 
-    ros2 topic pub /firefighter_mission/event std_msgs/String "{data: nav_goal_reached}"
+With ``use_nav2:=false`` the goal is only published and arrival must be injected
+by hand - useful without Nav2 running, and for driving transitions Nav2 cannot
+produce::
 
-When Nav2 lands, swap the ``/goal_pose`` publish for a ``nav2_msgs``
-``NavigateToPose`` action client and feed arrival/abort back as the same events -
-the FSM does not change.
+    ros2 topic pub --once /firefighter_mission/event std_msgs/String \
+        "{data: nav_goal_reached}"
 """
 from __future__ import annotations
 
@@ -32,8 +35,11 @@ import yaml
 from rclpy.node import Node
 from rclpy.qos import HistoryPolicy, QoSProfile, ReliabilityPolicy
 
+from action_msgs.msg import GoalStatus
 from diagnostic_msgs.msg import DiagnosticArray, DiagnosticStatus, KeyValue
 from geometry_msgs.msg import PoseStamped, Twist
+from nav2_msgs.action import NavigateToPose
+from rclpy.action import ActionClient
 from std_msgs.msg import Bool, String
 from std_srvs.srv import Trigger
 
@@ -54,7 +60,9 @@ class MissionNode(Node):
         # ---- topology --------------------------------------------------
         self.declare_parameter("beacon_topic", "/beacon_event")
         self.declare_parameter("flame_topic", "/flame_event")
-        self.declare_parameter("goal_topic", "/goal_pose")
+        self.declare_parameter("goal_viz_topic", "~/goal_pose")
+        self.declare_parameter("use_nav2", True)
+        self.declare_parameter("nav_action", "navigate_to_pose")
         self.declare_parameter("cmd_vel_topic", "/cmd_vel")
         self.declare_parameter("suppress_topic", "~/suppress")
         self.declare_parameter("state_topic", "~/state")
@@ -109,7 +117,9 @@ class MissionNode(Node):
             depth=10,
         )
 
-        self._goal_pub = self.create_publisher(PoseStamped, gp("goal_topic").value, reliable)
+        self._goal_pub = self.create_publisher(
+            PoseStamped, gp("goal_viz_topic").value, reliable
+        )
         self._cmd_vel_pub = self.create_publisher(Twist, gp("cmd_vel_topic").value, reliable)
         self._suppress_pub = self.create_publisher(Bool, gp("suppress_topic").value, reliable)
         self._state_pub = self.create_publisher(String, gp("state_topic").value, reliable)
@@ -123,6 +133,15 @@ class MissionNode(Node):
 
         self.create_service(Trigger, "~/estop", self._srv_estop)
         self.create_service(Trigger, "~/reset", self._srv_reset)
+
+        # ---- navigation ----------------------------------------------------
+        self._use_nav2 = bool(gp("use_nav2").value)
+        self._nav_handle = None
+        self._nav_client = (
+            ActionClient(self, NavigateToPose, gp("nav_action").value)
+            if self._use_nav2
+            else None
+        )
 
         tick_rate = max(0.1, float(gp("tick_rate_hz").value))
         self.create_timer(1.0 / tick_rate, self._on_tick)
@@ -159,8 +178,6 @@ class MissionNode(Node):
         state = msg.state
         if state == FlameEvent.IN_SUPPRESSION_RANGE:
             self._dispatch(Event.IN_RANGE)
-        elif state == FlameEvent.FLAME_LOST:
-            self._dispatch(Event.FLAME_LOST)
         elif state == FlameEvent.FLAME_EXTINGUISHED:
             self._dispatch(Event.FLAME_EXTINGUISHED)
         elif state == FlameEvent.FLAME_FOUND:
@@ -169,6 +186,14 @@ class MissionNode(Node):
                 self._dispatch(Event.FLAME_STILL_PRESENT)
             else:
                 self._dispatch(Event.FLAME_FOUND)
+        elif state == FlameEvent.FLAME_LOST:
+            # Perception reports what it sees, not what it means: losing sight of
+            # the flame while suppressing or verifying is how "it went out"
+            # arrives. Anywhere else it is just a lost track.
+            if self._fsm.state in (State.SUPPRESSING, State.VERIFYING):
+                self._dispatch(Event.FLAME_EXTINGUISHED)
+            else:
+                self._dispatch(Event.FLAME_LOST)
 
     def _on_manual_event(self, msg: String) -> None:
         name = msg.data.strip().lower()
@@ -217,13 +242,9 @@ class MissionNode(Node):
             elif action is Action.STOP_SEARCH:
                 self._publish_cmd_vel(0.0)
             elif action is Action.REQUEST_NAVIGATE:
-                self._goal_pub.publish(self._goal_pose())
-                x, y, yaw = self._lookup_goal()
-                self.get_logger().info(
-                    f"navigating to ({x:.2f}, {y:.2f}, {yaw:.2f}) in '{self._goal_frame}'"
-                )
+                self._request_navigation()
             elif action is Action.CANCEL_NAVIGATION:
-                self.get_logger().debug("navigation cancelled")
+                self._cancel_navigation()
             elif action is Action.START_SEARCH:
                 self.get_logger().info("searching for the flame")
             elif action is Action.START_APPROACH:
@@ -294,6 +315,66 @@ class MissionNode(Node):
         msg.pose.orientation.z = math.sin(yaw / 2.0)
         msg.pose.orientation.w = math.cos(yaw / 2.0)
         return msg
+
+    # ------------------------------------------------------------------
+    # Navigation (Nav2 NavigateToPose action)
+    # ------------------------------------------------------------------
+    def _request_navigation(self) -> None:
+        pose = self._goal_pose()
+        self._goal_pub.publish(pose)          # display / manual fallback
+
+        x, y, yaw = self._lookup_goal()
+        self.get_logger().info(
+            f"navigating to ({x:.2f}, {y:.2f}, {yaw:.2f}) in '{self._goal_frame}'"
+        )
+
+        if self._nav_client is None:
+            self.get_logger().warn(
+                "use_nav2 is false - waiting for a manual nav_goal_reached event"
+            )
+            return
+
+        goal = NavigateToPose.Goal()
+        goal.pose = pose
+        self._nav_handle = None
+        self._nav_client.send_goal_async(goal).add_done_callback(self._on_goal_response)
+
+    def _on_goal_response(self, future) -> None:
+        try:
+            handle = future.result()
+        except Exception as exc:  # noqa: BLE001 - a failed future must not kill us
+            self.get_logger().error(f"navigation goal failed to send: {exc}")
+            self._dispatch(Event.NAV_GOAL_FAILED)
+            return
+
+        if handle is None or not handle.accepted:
+            self.get_logger().warn("navigation goal rejected")
+            self._dispatch(Event.NAV_GOAL_FAILED)
+            return
+
+        self._nav_handle = handle
+        handle.get_result_async().add_done_callback(self._on_nav_result)
+
+    def _on_nav_result(self, future) -> None:
+        self._nav_handle = None
+        try:
+            status = future.result().status
+        except Exception as exc:  # noqa: BLE001
+            self.get_logger().error(f"navigation result unavailable: {exc}")
+            self._dispatch(Event.NAV_GOAL_FAILED)
+            return
+
+        if status == GoalStatus.STATUS_SUCCEEDED:
+            self._dispatch(Event.NAV_GOAL_REACHED)
+        else:
+            self.get_logger().warn(f"navigation ended with status {status}")
+            self._dispatch(Event.NAV_GOAL_FAILED)
+
+    def _cancel_navigation(self) -> None:
+        handle, self._nav_handle = self._nav_handle, None
+        if handle is not None:
+            handle.cancel_goal_async()
+            self.get_logger().info("navigation cancelled")
 
     def _load_goals(self, path: str):
         """Load a MAC -> pose map, e.g.:  'aa:bb:cc:dd:ee:ff: {x: 3.0, y: 1.5, yaw: 0.0}'."""
