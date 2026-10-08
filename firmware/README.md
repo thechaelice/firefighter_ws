@@ -52,15 +52,14 @@ typedef struct struct_message {
 ```
 
 ### Pairing & MAC Address Setup
-1. Flash `robot_mobility.ino` to the robot ESP32 and open the Serial Monitor (115200 baud).
-2. Note the printed Receiver MAC Address:
-   ```text
-   Receiver MAC Address: XX:XX:XX:XX:XX:XX
-   ```
-3. Enter this MAC address in `firmware/beacon/beacon.ino` inside the `receiverMAC` array:
-   ```cpp
-   uint8_t receiverMAC[] = {0xXX, 0xXX, 0xXX, 0xXX, 0xXX, 0xXX};
-   ```
+Pairing is automatic; no MAC address is hardcoded.
+
+1. The beacon broadcasts a `PAIR_REQUEST` every 500 ms until it has a receiver.
+2. The mobility ESP32 answers with a broadcast `PAIR_REPLY`.
+3. The beacon takes the receiver MAC from the source address of that reply, registers it as its ESP-NOW peer and starts sending alert packets to it (`Receiver found: XX:XX:XX:XX:XX:XX` on the beacon's Serial Monitor).
+4. After 5 consecutive undelivered packets the beacon forgets the receiver and goes back to step 1, so a swapped or rebooted mobility ESP32 is picked up without reflashing.
+
+Both sketches must be flashed with matching `pair_message` definitions. The beacon pairs with the first mobility ESP32 that answers, so only one should be powered within range.
 
 ### Signal Strength (RSSI) & Distance Estimation
 * **Interim (Active)**: The mobility ESP32 captures the received packet signal strength (RSSI in dBm) via a promiscuous Wi-Fi hook (Core 2.0.x) or `esp_now_recv_info_t` (Core 3.0.x) and forwards it in `MSG_BEACON_EVENT` to ROS 2 topic `/beacon_event`.

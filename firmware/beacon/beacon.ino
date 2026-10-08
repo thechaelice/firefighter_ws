@@ -15,12 +15,38 @@
 #include <esp_now.h>
 
 // ============================================================
-// RECEIVER MAC ADDRESS (Robot Mobility ESP32)
-// Update this with the MAC address printed by robot_mobility.ino
+// RECEIVER DISCOVERY (Robot Mobility ESP32)
+//
+// The receiver MAC is not hardcoded. The beacon broadcasts a
+// PAIR_REQUEST until the mobility ESP32 answers with a PAIR_REPLY,
+// then takes the receiver MAC from the source address of that reply.
+// If the receiver stops acknowledging packets the beacon forgets it
+// and starts discovering again.
 // ============================================================
-uint8_t receiverMAC[] = {
-  0x3C, 0x8A, 0x1F, 0x7E, 0x36, 0x8C
-};
+const uint8_t BROADCAST_MAC[6] = {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF};
+
+// Pairing message (MUST MATCH robot_mobility.ino EXACTLY).
+// Its size differs from struct_message, so the two never get confused.
+const uint32_t PAIR_MAGIC   = 0x46465052;   // "FFPR"
+const uint8_t  PAIR_REQUEST = 1;            // beacon   -> broadcast
+const uint8_t  PAIR_REPLY   = 2;            // mobility -> broadcast
+
+typedef struct __attribute__((packed)) pair_message {
+  uint32_t magic;
+  uint8_t  type;
+} pair_message;
+
+const uint32_t DISCOVERY_PERIOD_MS = 500;   // PAIR_REQUEST interval while searching
+const int      MAX_SEND_FAILURES   = 5;     // consecutive failed packets -> rediscover
+
+uint8_t receiverMAC[6] = {0};
+bool    receiverKnown  = false;
+uint32_t lastDiscoveryMs = 0;
+
+// Written by the ESP-NOW callbacks (Wi-Fi task), consumed in loop()
+volatile bool pairReplyPending = false;
+uint8_t       pairReplyMAC[6]  = {0};
+volatile int  sendFailCount    = 0;
 
 
 // ============================================================
@@ -77,11 +103,90 @@ void OnDataSent(const wifi_tx_info_t *tx_info, esp_now_send_status_t status) {
 #else
 void OnDataSent(const uint8_t *mac_addr, esp_now_send_status_t status) {
 #endif
+  if (!receiverKnown) return;   // discovery broadcasts are never acknowledged
+
   Serial.print("Delivery Status: ");
   if (status == ESP_NOW_SEND_SUCCESS) {
     Serial.println("SUCCESS");
+    sendFailCount = 0;
   } else {
     Serial.println("FAILED");
+    sendFailCount = sendFailCount + 1;
+  }
+}
+
+
+// ============================================================
+// RECEIVE CALLBACK (pairing replies only)
+// ============================================================
+void handlePairReply(const uint8_t *mac, const uint8_t *data, int len) {
+  if (receiverKnown || pairReplyPending) return;
+  if (!mac || len != (int)sizeof(pair_message)) return;
+
+  pair_message msg;
+  memcpy(&msg, data, sizeof(msg));
+  if (msg.magic != PAIR_MAGIC || msg.type != PAIR_REPLY) return;
+
+  memcpy(pairReplyMAC, mac, 6);
+  pairReplyPending = true;
+}
+
+#if defined(ESP_IDF_VERSION) && (ESP_IDF_VERSION >= ESP_IDF_VERSION_VAL(5, 0, 0))
+void OnDataRecv(const esp_now_recv_info_t *info, const uint8_t *data, int len) {
+  handlePairReply(info ? info->src_addr : nullptr, data, len);
+}
+#else
+void OnDataRecv(const uint8_t *mac_addr, const uint8_t *data, int len) {
+  handlePairReply(mac_addr, data, len);
+}
+#endif
+
+
+// ============================================================
+// RECEIVER DISCOVERY
+// ============================================================
+void sendPairRequest() {
+  pair_message msg = { PAIR_MAGIC, PAIR_REQUEST };
+  esp_now_send(BROADCAST_MAC, (const uint8_t *)&msg, sizeof(msg));
+  Serial.println("Searching for mobility ESP32...");
+}
+
+void forgetReceiver() {
+  esp_now_del_peer(receiverMAC);
+  receiverKnown = false;
+  sendFailCount = 0;
+  Serial.println("Receiver lost. Restarting discovery.");
+}
+
+// Runs in loop(): finish a pending pairing, drop a dead receiver,
+// and keep broadcasting PAIR_REQUEST while no receiver is known.
+void updateDiscovery(uint32_t now) {
+  if (receiverKnown && sendFailCount >= MAX_SEND_FAILURES) {
+    forgetReceiver();
+  }
+
+  if (pairReplyPending) {
+    esp_now_peer_info_t peerInfo = {};
+    memcpy(peerInfo.peer_addr, pairReplyMAC, 6);
+    peerInfo.channel = 0;
+    peerInfo.encrypt = false;
+
+    if (esp_now_add_peer(&peerInfo) == ESP_OK) {
+      memcpy(receiverMAC, pairReplyMAC, 6);
+      sendFailCount = 0;
+      receiverKnown = true;
+      Serial.printf("Receiver found: %02X:%02X:%02X:%02X:%02X:%02X\n",
+                    receiverMAC[0], receiverMAC[1], receiverMAC[2],
+                    receiverMAC[3], receiverMAC[4], receiverMAC[5]);
+    } else {
+      Serial.println("ERROR: Failed to add receiver!");
+    }
+    pairReplyPending = false;
+  }
+
+  if (!receiverKnown && now - lastDiscoveryMs >= DISCOVERY_PERIOD_MS) {
+    lastDiscoveryMs = now;
+    sendPairRequest();
   }
 }
 
@@ -178,23 +283,23 @@ void setup() {
   }
   Serial.println("ESP-NOW initialized successfully.");
 
-  // Register send callback
+  // Register callbacks
   esp_now_register_send_cb(OnDataSent);
+  esp_now_register_recv_cb(OnDataRecv);
 
-  // Register receiver as peer
+  // Broadcast peer, used to find the receiver
   esp_now_peer_info_t peerInfo = {};
-  memcpy(peerInfo.peer_addr, receiverMAC, 6);
+  memcpy(peerInfo.peer_addr, BROADCAST_MAC, 6);
   peerInfo.channel = 0;
   peerInfo.encrypt = false;
 
   if (esp_now_add_peer(&peerInfo) != ESP_OK) {
-    Serial.println("ERROR: Failed to add receiver!");
+    Serial.println("ERROR: Failed to add broadcast peer!");
     return;
   }
 
-  Serial.println("Receiver added successfully.");
   Serial.println();
-  Serial.println("Beginning transmission...");
+  Serial.println("Beginning receiver discovery...");
   Serial.println("================================");
 }
 
@@ -208,8 +313,12 @@ void loop() {
   // ---- Sensors + alarm LED ---------------------------------
   updateSensors();
 
+  // ---- Receiver discovery ---------------------------------
+  updateDiscovery(now);
+
   // ---- Periodic Beacon Transmission ------------------------
-  if (now - lastSendMs >= BEACON_PERIOD_MS) {
+  // Detections stay latched until a receiver is known.
+  if (receiverKnown && now - lastSendMs >= BEACON_PERIOD_MS) {
     lastSendMs = now;
     sendBeaconPacket();
   }

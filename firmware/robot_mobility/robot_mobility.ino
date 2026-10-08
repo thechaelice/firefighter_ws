@@ -180,6 +180,26 @@ struct_message incomingData;
 // Fallback trigger requires this many consecutive detections
 const int REQUIRED_DETECTIONS = 2;
 
+// ---- Beacon pairing ----------------------------------------
+// The beacon does not hardcode this board's MAC. It broadcasts a
+// PAIR_REQUEST; we answer with a broadcast PAIR_REPLY and the beacon
+// reads our MAC from the reply's source address.
+// (MUST MATCH beacon.ino EXACTLY. Its size differs from
+// struct_message, so the two never get confused.)
+const uint8_t BROADCAST_MAC[6] = {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF};
+
+const uint32_t PAIR_MAGIC   = 0x46465052;   // "FFPR"
+const uint8_t  PAIR_REQUEST = 1;            // beacon   -> broadcast
+const uint8_t  PAIR_REPLY   = 2;            // mobility -> broadcast
+
+typedef struct __attribute__((packed)) pair_message {
+  uint32_t magic;
+  uint8_t  type;
+} pair_message;
+
+// Set in the ESP-NOW callback, answered from loop()
+volatile bool pairReplyPending = false;
+
 
 // ============================================================
 // STATE
@@ -504,8 +524,27 @@ void promiscuousRxCallback(void* buf, wifi_promiscuous_pkt_type_t type) {
   latestRssi = pkt->rx_ctrl.rssi;
 }
 
+// True (and queues a PAIR_REPLY) if the packet is a beacon PAIR_REQUEST
+bool handlePairRequest(const uint8_t* data, int len) {
+  if (len != (int)sizeof(pair_message)) return false;
+
+  pair_message msg;
+  memcpy(&msg, data, sizeof(msg));
+  if (msg.magic != PAIR_MAGIC || msg.type != PAIR_REQUEST) return false;
+
+  pairReplyPending = true;
+  return true;
+}
+
+void sendPairReply() {
+  pair_message msg = { PAIR_MAGIC, PAIR_REPLY };
+  esp_now_send(BROADCAST_MAC, (const uint8_t*)&msg, sizeof(msg));
+  DBG.printf("[espnow] pair request answered\n");
+}
+
 #if defined(ESP_IDF_VERSION) && (ESP_IDF_VERSION >= ESP_IDF_VERSION_VAL(5, 0, 0))
 void OnDataRecv(const esp_now_recv_info_t *info, const uint8_t *incomingDataBytes, int len) {
+  if (handlePairRequest(incomingDataBytes, len)) return;
   if (len != (int)sizeof(incomingData)) return;
 
   memcpy(&incomingData, incomingDataBytes, sizeof(incomingData));
@@ -542,6 +581,7 @@ void OnDataRecv(const esp_now_recv_info_t *info, const uint8_t *incomingDataByte
 }
 #else
 void OnDataRecv(const uint8_t* mac_addr, const uint8_t* incomingDataBytes, int len) {
+  if (handlePairRequest(incomingDataBytes, len)) return;
   if (len != (int)sizeof(incomingData)) return;
 
   memcpy(&incomingData, incomingDataBytes, sizeof(incomingData));
@@ -648,6 +688,15 @@ void setup() {
   }
   esp_now_register_recv_cb(OnDataRecv);
 
+  // Broadcast peer, used to answer beacon pair requests
+  esp_now_peer_info_t peerInfo = {};
+  memcpy(peerInfo.peer_addr, BROADCAST_MAC, 6);
+  peerInfo.channel = 0;
+  peerInfo.encrypt = false;
+  if (esp_now_add_peer(&peerInfo) != ESP_OK) {
+    DBG.println("ERROR: failed to add broadcast peer (beacon pairing disabled)");
+  }
+
   DBG.println("ESP-NOW ready.");
 
   if (MOTION_OWNER_IS_PI) {
@@ -677,7 +726,13 @@ void loop() {
   // ---- 3. Fallback maneuver ------------------------------
   fallbackUpdate();
 
-  // ---- 4. Periodic telemetry -----------------------------
+  // ---- 4. Beacon pairing ---------------------------------
+  if (pairReplyPending) {
+    pairReplyPending = false;
+    sendPairReply();
+  }
+
+  // ---- 5. Periodic telemetry -----------------------------
   uint32_t now = millis();
 
   if (now - lastOdomMs >= ODOM_PERIOD_MS) {
@@ -698,6 +753,6 @@ void loop() {
     sendHeartbeat();
   }
 
-  // ---- 5. Yield ------------------------------------------
+  // ---- 6. Yield ------------------------------------------
   delay(1);
 }
