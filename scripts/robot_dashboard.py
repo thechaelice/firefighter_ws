@@ -4,6 +4,8 @@
 One page showing everything the robot is doing right now:
 
   * LiDAR        - live 2D scan (and an optional PointCloud2 in 3D)
+  * Map          - the SLAM / localization occupancy grid with the robot on it
+  * Thermal      - the live thermal camera image
   * Beacon       - last alert: fire/smoke, RSSI + rough range, MAC, packet count
   * Mobility ESP32 - link health, mode, flags, e-stop, battery (via /diagnostics)
   * Mission      - FSM state, suppression, current goal
@@ -13,7 +15,10 @@ One page showing everything the robot is doing right now:
   * Events       - a rolling log of detections, state changes and link changes
 
 Data is gathered by one rclpy node and served as JSON on ``/api/telemetry``;
-the LiDAR canvas streams from ``/api/scan`` (or ``/api/cloud``).  The page is
+the LiDAR canvas streams from ``/api/scan`` (or ``/api/cloud``), the map from
+``/api/map`` and the thermal image from ``/api/thermal``.  The map and thermal
+feeds are optional: the page only fetches them while they are on screen, and
+``--map-topic ""`` / ``--thermal-topic ""`` switch them off entirely.  The page is
 plain HTML/CSS/JS with no external assets, so it works on an isolated network.
 
     cd ~/firefighter_ws && source install/setup.bash
@@ -26,6 +31,8 @@ on a trusted network.
 from __future__ import annotations
 
 import argparse
+import base64
+import gzip
 import json
 import math
 import struct
@@ -39,12 +46,18 @@ from urllib.parse import urlsplit
 import rclpy
 from rclpy.executors import SingleThreadedExecutor
 from rclpy.node import Node
-from rclpy.qos import HistoryPolicy, QoSProfile, ReliabilityPolicy, qos_profile_sensor_data
+from rclpy.qos import (
+    DurabilityPolicy,
+    HistoryPolicy,
+    QoSProfile,
+    ReliabilityPolicy,
+    qos_profile_sensor_data,
+)
 
 from diagnostic_msgs.msg import DiagnosticArray
 from geometry_msgs.msg import PoseStamped, Twist
-from nav_msgs.msg import Odometry
-from sensor_msgs.msg import BatteryState, LaserScan, PointCloud2, PointField
+from nav_msgs.msg import OccupancyGrid, Odometry
+from sensor_msgs.msg import BatteryState, Image, LaserScan, PointCloud2, PointField
 from std_msgs.msg import Bool, String
 
 try:  # the workspace messages; degrade gracefully if they are not built
@@ -54,6 +67,14 @@ try:  # the workspace messages; degrade gracefully if they are not built
 except ImportError:  # pragma: no cover - depends on a sourced workspace
     BeaconEvent = FlameEvent = None  # type: ignore[assignment]
     HAVE_ROBOT_MSGS = False
+
+try:  # the robot's pose on the map comes from TF; the map still shows without it
+    from rclpy.time import Time
+    from tf2_ros import Buffer, TransformException, TransformListener
+
+    HAVE_TF = True
+except ImportError:  # pragma: no cover - depends on the ROS install
+    HAVE_TF = False
 
 
 EVENT_LOG_SIZE = 40
@@ -152,8 +173,16 @@ class RobotDashboard(Node):
         self._event_seq = 0
         self._max_cloud_points = args.max_cloud_points
 
+        self._base_frame = args.base_frame
+        self.features = {"thermal": bool(args.thermal_topic), "map": bool(args.map_topic)}
+
         self._scan: dict | None = None
         self._cloud: dict | None = None
+        self._thermal: dict | None = None
+        self._thermal_warned = False
+        self._grid: dict | None = None      # map metadata + the ready-to-send grid body
+        self._map_seq = 0
+        self._tf_buffer = None
         self._beacon: dict | None = None
         self._flame: dict | None = None
         self._command: dict | None = None
@@ -178,6 +207,26 @@ class RobotDashboard(Node):
         if args.pointcloud_topic:
             self._subscribe(PointCloud2, args.pointcloud_topic, "sensor_msgs/PointCloud2",
                             self._on_cloud, sensor=True)
+        if args.thermal_topic:
+            self._subscribe(Image, args.thermal_topic, "sensor_msgs/Image",
+                            self._on_thermal, sensor=True)
+        if args.map_topic:
+            # Maps are latched: SLAM Toolbox and map_server publish them
+            # transient-local, and only when the map changes.
+            map_qos = QoSProfile(
+                reliability=ReliabilityPolicy.RELIABLE,
+                durability=DurabilityPolicy.TRANSIENT_LOCAL,
+                history=HistoryPolicy.KEEP_LAST,
+                depth=1,
+            )
+            self._subscribe(OccupancyGrid, args.map_topic, "nav_msgs/OccupancyGrid",
+                            self._on_map, periodic=False, qos=map_qos)
+            if HAVE_TF:
+                self._tf_buffer = Buffer()
+                self._tf_listener = TransformListener(self._tf_buffer, self)
+            else:
+                self.get_logger().warn(
+                    "tf2_ros not importable - the map is shown without the robot's pose.")
         if HAVE_ROBOT_MSGS:
             self._subscribe(BeaconEvent, args.beacon_topic,
                             "firefighter_interfaces/BeaconEvent", self._on_beacon,
@@ -214,7 +263,8 @@ class RobotDashboard(Node):
     # Subscription plumbing
     # ------------------------------------------------------------------
     def _subscribe(self, msg_type, topic: str, type_name: str, callback,
-                   sensor: bool = False, periodic: bool = True) -> None:
+                   sensor: bool = False, periodic: bool = True,
+                   qos: QoSProfile | None = None) -> None:
         stats = TopicStats(topic, type_name, periodic)
         self._stats[topic] = stats
 
@@ -229,7 +279,7 @@ class RobotDashboard(Node):
             msg_type,
             topic,
             wrapper,
-            qos_profile_sensor_data if sensor else self._status_qos,
+            qos or (qos_profile_sensor_data if sensor else self._status_qos),
         )
 
     def _log_event(self, source: str, level: str, text: str) -> None:
@@ -303,6 +353,70 @@ class RobotDashboard(Node):
                 "at": time.monotonic(),
                 "points": points,
             }
+
+    def _on_thermal(self, msg: Image) -> None:
+        if msg.encoding != "32FC1":
+            if not self._thermal_warned:
+                self._thermal_warned = True
+                self.get_logger().warning(
+                    f"Ignoring thermal image: expected 32FC1 (deg C), got {msg.encoding!r}")
+            return
+        width, height = int(msg.width), int(msg.height)
+        data = bytes(msg.data)
+        if width == 0 or height == 0 or msg.step < width * 4 or len(data) < height * msg.step:
+            return
+        row_format = f"{'>' if msg.is_bigendian else '<'}{width}f"
+        temps: list[float | None] = []
+        for row in range(height):
+            temps.extend(
+                round(value, 1) if math.isfinite(value) else None
+                for value in struct.unpack_from(row_format, data, row * msg.step)
+            )
+        valid = [value for value in temps if value is not None]
+        if not valid:
+            return
+        with self._lock:
+            self._thermal = {
+                "frame_id": msg.header.frame_id,
+                "at": time.monotonic(),
+                "width": width,
+                "height": height,
+                "min": min(valid),
+                "max": max(valid),
+                "mean": round(sum(valid) / len(valid), 1),
+                "temps": temps,     # row-major, row 0 on top, column 0 on the left
+            }
+
+    def _on_map(self, msg: OccupancyGrid) -> None:
+        info = msg.info
+        width, height = int(info.width), int(info.height)
+        if width == 0 or height == 0 or len(msg.data) < width * height:
+            return
+        # int8 cells (-1 unknown, 0..100 occupied) travel as one unsigned byte
+        # each, so unknown becomes 255.
+        try:
+            cells = msg.data.tobytes()
+        except AttributeError:
+            cells = bytes(int(value) & 0xFF for value in msg.data)
+        origin = info.origin
+        with self._lock:
+            self._map_seq += 1
+            meta = {
+                "seq": self._map_seq,
+                "frame_id": msg.header.frame_id or "map",
+                "width": width,
+                "height": height,
+                "resolution": float(info.resolution),
+                "origin": {"x": float(origin.position.x), "y": float(origin.position.y)},
+            }
+        # Built once per map update rather than once per request; grids are
+        # mostly runs of the same value, so gzip shrinks them by orders of magnitude.
+        body = gzip.compress(
+            json.dumps({**meta, "cells": base64.b64encode(cells).decode("ascii")}).encode("utf-8"),
+            compresslevel=5,
+        )
+        with self._lock:
+            self._grid = {"meta": meta, "at": time.monotonic(), "body": body}
 
     def _on_beacon(self, msg) -> None:
         now = time.monotonic()
@@ -470,6 +584,53 @@ class RobotDashboard(Node):
         with self._lock:
             return self._with_age(self._cloud)
 
+    def thermal_snapshot(self) -> dict | None:
+        with self._lock:
+            return self._with_age(self._thermal)
+
+    def grid_body(self) -> bytes | None:
+        """The gzip-compressed JSON grid for ``/api/map/grid``."""
+        with self._lock:
+            return self._grid["body"] if self._grid else None
+
+    def map_snapshot(self) -> dict:
+        """Map metadata and where the robot is on it - small enough to poll."""
+        with self._lock:
+            grid = self._grid
+            scan_frame = self._scan["frame_id"] if self._scan else None
+        if grid is None:
+            return {"grid": None, "pose": None, "scan_pose": None,
+                    "base_frame": self._base_frame}
+        frame = grid["meta"]["frame_id"]
+        return {
+            "grid": {**grid["meta"], "age": _age(grid["at"])},
+            "base_frame": self._base_frame,
+            "pose": self._lookup_pose(frame, self._base_frame),
+            "scan_pose": self._lookup_pose(frame, scan_frame) if scan_frame else None,
+        }
+
+    def _lookup_pose(self, target_frame: str, source_frame: str) -> dict | None:
+        if self._tf_buffer is None:
+            return None
+        try:
+            transform = self._tf_buffer.lookup_transform(target_frame, source_frame, Time())
+        except TransformException:
+            return None
+        translation = transform.transform.translation
+        rotation = transform.transform.rotation
+        # The latest transform is returned however old it is, so report its age
+        # (a zero stamp means a static transform, which does not age).
+        stamp = Time.from_msg(transform.header.stamp)
+        age = None
+        if stamp.nanoseconds:
+            age = (self.get_clock().now() - stamp).nanoseconds * 1e-9
+        return {
+            "x": _finite(translation.x),
+            "y": _finite(translation.y),
+            "yaw": _finite(_yaw_from_quaternion(rotation.x, rotation.y, rotation.z, rotation.w)),
+            "age": _finite(age),
+        }
+
     def telemetry_snapshot(self) -> dict:
         with self._lock:
             beacon = dict(self._beacon) if self._beacon else None
@@ -490,6 +651,7 @@ class RobotDashboard(Node):
         return {
             "now": time.time(),
             "robot_msgs": HAVE_ROBOT_MSGS,
+            "features": self.features,
             "beacon": self._beacon_view(beacon),
             "esp32": self._esp32_view(esp32),
             "battery": battery,
@@ -639,7 +801,7 @@ PAGE = r"""<!doctype html>
     .ts { color:var(--muted); font-size:12px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
 
     .split { display:grid; gap:14px; grid-template-columns:minmax(0, 2fr) minmax(300px, 1fr); }
-    .side { display:grid; gap:14px; align-content:start; min-width:0; }
+    .side, .primary { display:grid; gap:14px; align-content:start; min-width:0; }
     @media (max-width: 980px) {
       .split { grid-template-columns:1fr; }
       .side { grid-template-columns:repeat(auto-fit, minmax(270px, 1fr)); }
@@ -648,7 +810,7 @@ PAGE = r"""<!doctype html>
     .card > h2 { margin:0 0 10px; font-size:12px; text-transform:uppercase; letter-spacing:.09em;
                  color:var(--muted); font-weight:600; display:flex; align-items:center; gap:8px; min-height:26px; }
     .card > h2 .hint { margin-left:auto; font-size:12px; letter-spacing:0; text-transform:none;
-                       font-weight:400; color:var(--dim); }
+                       font-weight:400; color:var(--dim); display:inline-flex; align-items:center; gap:8px; }
     body.offline .card, body.offline .tile { opacity:.5; }
 
     .kv { display:grid; grid-template-columns:auto 1fr; gap:5px 14px; margin:0; font-variant-numeric:tabular-nums; }
@@ -684,9 +846,16 @@ PAGE = r"""<!doctype html>
     .seg button + button { border-left:1px solid var(--line); }
     button.chip { border:1px solid var(--line); border-radius:999px; padding:2px 10px; font-size:12px; }
     /* The canvas is absolutely positioned so its pixel size never feeds back into layout. */
-    #stage { position:relative; flex:1; min-height:clamp(320px, 56vh, 620px); background:#0a0d10;
+    #stage { position:relative; height:clamp(320px, 62vh, 760px); background:#0a0d10;
              border:1px solid var(--line); border-radius:6px; overflow:hidden; }
     canvas { position:absolute; inset:0; width:100%; height:100%; display:block; }
+    #thermalStage { position:relative; aspect-ratio:4 / 3; background:#0a0d10;
+                    border:1px solid var(--line); border-radius:6px; overflow:hidden; }
+    #thermal { cursor:crosshair; }
+    .scale { display:flex; align-items:center; gap:8px; margin:8px 0 10px; color:var(--muted);
+             font-size:12px; font-variant-numeric:tabular-nums; }
+    .scale i { flex:1; height:8px; border-radius:4px;
+               background:linear-gradient(90deg, #000004, #320a5e, #781c6d, #bc3754, #ed6925, #fbb61a, #fcffa4); }
     canvas.orbit { cursor:grab; touch-action:none; }
     canvas.orbit:active { cursor:grabbing; }
 
@@ -699,7 +868,7 @@ PAGE = r"""<!doctype html>
     td.label, td.unit { color:var(--muted); }
     tr.quiet td { color:var(--dim); }
     .scroll { max-height:360px; overflow:auto; }
-    #events { list-style:none; margin:0; padding:0; max-height:360px; overflow:auto; }
+    #events { list-style:none; margin:0; padding:0; max-height:300px; overflow:auto; }
     #events li { display:grid; grid-template-columns:84px 96px 1fr; gap:10px; padding:5px 0;
                  border-bottom:1px solid #20282f; align-items:baseline; }
     #events li:last-child { border-bottom:0; }
@@ -725,23 +894,44 @@ PAGE = r"""<!doctype html>
     <section class="tiles" id="tiles" aria-label="Robot status at a glance"></section>
 
     <div class="split">
-      <div class="card lidar">
-        <h2>LiDAR <span class="hint" id="scanHint"></span></h2>
-        <div class="toolbar">
-          <span class="seg" role="group" aria-label="LiDAR view">
-            <button id="twoD" type="button">Top-down</button>
-            <button id="threeD" type="button">3D</button>
-          </span>
-          <label>Range <input id="range" type="range" min="2" max="30" step="1" value="8"><span id="rangeValue">8 m</span></label>
-          <span class="tip" id="viewTip"></span>
+      <div class="primary">
+        <div class="card lidar">
+          <h2><span id="viewTitle">LiDAR</span> <span class="hint" id="scanHint"></span></h2>
+          <div class="toolbar">
+            <span class="seg" role="group" aria-label="LiDAR view">
+              <button id="twoD" type="button">Top-down</button>
+              <button id="threeD" type="button">3D</button>
+              <button id="mapView" type="button" hidden>Map</button>
+            </span>
+            <button id="fitMap" type="button" class="chip" hidden>Whole map</button>
+            <label>Range <input id="range" type="range" min="2" max="30" step="1" value="8"><span id="rangeValue">8 m</span></label>
+            <span class="tip" id="viewTip"></span>
+          </div>
+          <div id="stage"><canvas id="view" role="img" aria-label="LiDAR scan or map around the robot"></canvas></div>
         </div>
-        <div id="stage"><canvas id="view" role="img" aria-label="LiDAR scan around the robot"></canvas></div>
+        <div class="card">
+          <h2>Event log
+            <span class="hint"><button id="alertsOnly" type="button" class="chip">Problems only</button></span>
+          </h2>
+          <ul id="events"></ul>
+        </div>
       </div>
 
       <div class="side">
         <div class="card">
           <h2>Mission <span class="hint" id="missionHint"></span></h2>
           <dl class="kv" id="missionKv"></dl>
+        </div>
+        <div class="card" id="thermalCard" hidden>
+          <h2>Thermal camera
+            <span class="hint"><span id="thermalHint"></span>
+              <button id="thermalToggle" type="button" class="chip">Hide</button></span>
+          </h2>
+          <div id="thermalBody">
+            <div id="thermalStage"><canvas id="thermal" role="img" aria-label="Thermal camera image"></canvas></div>
+            <div class="scale"><span id="thermalLo"></span><i></i><span id="thermalHi"></span></div>
+            <dl class="kv" id="thermalKv"></dl>
+          </div>
         </div>
         <div class="card">
           <h2>Beacon <span class="hint" id="beaconHint"></span></h2>
@@ -761,24 +951,15 @@ PAGE = r"""<!doctype html>
             <tbody id="odom"></tbody>
           </table>
         </div>
-      </div>
-    </div>
-
-    <div class="split">
-      <div class="card">
-        <h2>Event log
-          <span class="hint"><button id="alertsOnly" type="button" class="chip">Problems only</button></span>
-        </h2>
-        <ul id="events"></ul>
-      </div>
-      <div class="card">
-        <h2>Topics <span class="hint">rate · last message</span></h2>
-        <div class="scroll">
-          <table>
-            <colgroup><col style="width:22px"><col><col style="width:74px"><col style="width:62px"></colgroup>
-            <thead><tr><th></th><th>Topic</th><th class="right">Rate</th><th class="right">Last</th></tr></thead>
-            <tbody id="topics"></tbody>
-          </table>
+        <div class="card">
+          <h2>Topics <span class="hint">rate · last message</span></h2>
+          <div class="scroll">
+            <table>
+              <colgroup><col style="width:22px"><col><col style="width:74px"><col style="width:62px"></colgroup>
+              <thead><tr><th></th><th>Topic</th><th class="right">Rate</th><th class="right">Last</th></tr></thead>
+              <tbody id="topics"></tbody>
+            </table>
+          </div>
         </div>
       </div>
     </div>
@@ -790,15 +971,26 @@ PAGE = r"""<!doctype html>
     const canvas = $('view'), ctx = canvas.getContext('2d');
     const rangeSlider = $('range'), rangeValue = $('rangeValue');
     const BASE_TITLE = document.title;
-    const FETCH_TIMEOUT_MS = 2500, SCAN_STALE_S = 2, LIVE_S = 1.5;
+    const FETCH_TIMEOUT_MS = 2500, SCAN_STALE_S = 2, LIVE_S = 1.5, POSE_STALE_S = 3;
+    // Never stretch the colour scale over less than this, or sensor noise in an
+    // evenly warm room would be painted from black to white like a fire.
+    const THERMAL_MIN_SPAN_C = 15;
     const C = { bg:'#0a0d10', grid:'#222c35', axis:'#3a4651', label:'#7b8792',
-                point:'#7cc4ff', pointStale:'#3d5a73', robot:'#e6edf3', flame:'#ff7a45' };
+                point:'#7cc4ff', pointStale:'#3d5a73', robot:'#e6edf3', flame:'#ff7a45',
+                trail:'#8b98a5', goal:'#d2a8ff' };
+    const MODES = ['2d', '3d', 'map'];
+    const TITLES = {'2d':'LiDAR', '3d':'LiDAR', map:'Map'};
     // View preferences are per browser; the dashboard works without storage too.
     const store = {
       get(key, fallback) { try { return localStorage.getItem('ff.' + key) ?? fallback; } catch (_) { return fallback; } },
       set(key, value) { try { localStorage.setItem('ff.' + key, value); } catch (_) { /* private mode */ } },
     };
-    let mode = store.get('mode', '2d') === '3d' ? '3d' : '2d', scan = null, cloud = null;
+    let mode = MODES.includes(store.get('mode', '2d')) ? store.get('mode', '2d') : '2d';
+    let scan = null, cloud = null;
+    let features = null, thermal = null, thermalHover = null, thermalBusy = false;
+    let thermalShown = store.get('thermal', '1') === '1';
+    let mapInfo = null, mapGrid = null, gridBusy = false, mapFit = store.get('mapFit', '0') === '1';
+    const trail = [];
     let alertsOnly = store.get('alertsOnly', '0') === '1';
     let azimuth = -0.7, elevation = 0.65, zoom = 1;
     let dragging = false, lastX = 0, lastY = 0;
@@ -836,9 +1028,9 @@ PAGE = r"""<!doctype html>
       lastHtml.set(id, html); $(id).innerHTML = html;
     }
     function setText(id, text) { const el = $(id); if (el.textContent !== text) el.textContent = text; }
-    async function getJson(url) {
+    async function getJson(url, timeoutMs = FETCH_TIMEOUT_MS) {
       try {
-        const res = await fetch(url, {cache: 'no-store', signal: AbortSignal.timeout(FETCH_TIMEOUT_MS)});
+        const res = await fetch(url, {cache: 'no-store', signal: AbortSignal.timeout(timeoutMs)});
         if (!res.ok) throw new Error(`HTTP ${res.status}`);
         return await res.json();
       } catch (err) {
@@ -974,10 +1166,125 @@ PAGE = r"""<!doctype html>
         ctx.font = '600 12px system-ui';
         ctx.fillText(known ? `flame ${flame.distance_m.toFixed(2)} m` : 'flame', fx + 10, fy + 4);
       }
-      // the robot, nose up
-      ctx.fillStyle = C.robot;
-      ctx.beginPath(); ctx.moveTo(cx, cy - 9); ctx.lineTo(cx + 6.5, cy + 7); ctx.lineTo(cx, cy + 3.5);
-      ctx.lineTo(cx - 6.5, cy + 7); ctx.closePath(); ctx.fill();
+      drawRobot(cx, cy, 0);
+    }
+    // The robot as an arrow; `turn` is clockwise from nose-up, in radians.
+    function drawRobot(x, y, turn) {
+      ctx.save(); ctx.translate(x, y); ctx.rotate(turn);
+      ctx.fillStyle = C.robot; ctx.strokeStyle = C.bg; ctx.lineWidth = 1.5;
+      ctx.beginPath(); ctx.moveTo(0, -9); ctx.lineTo(6.5, 7); ctx.lineTo(0, 3.5); ctx.lineTo(-6.5, 7);
+      ctx.closePath(); ctx.fill(); ctx.stroke();
+      ctx.restore();
+    }
+
+    // ---------- map (SLAM / localization) ----------
+    const rgba = hex => (0xff000000 | parseInt(hex.slice(5, 7), 16) << 16 |
+                         parseInt(hex.slice(3, 5), 16) << 8 | parseInt(hex.slice(1, 3), 16)) >>> 0;
+    const CELL = { unknown: rgba('#0a0d10'), free: rgba('#27323d'), unsure: rgba('#55626f'), wall: rgba('#e6edf3') };
+    async function loadGrid() {
+      if (gridBusy) return;
+      gridBusy = true;
+      try {
+        const g = await getJson('/api/map/grid', 15000);
+        const raw = atob(g.cells);
+        const img = document.createElement('canvas');
+        img.width = g.width; img.height = g.height;
+        const ictx = img.getContext('2d');
+        const pixels = ictx.createImageData(g.width, g.height);
+        const out = new Uint32Array(pixels.data.buffer);
+        let minC = g.width, maxC = -1, minR = g.height, maxR = -1;
+        for (let r = 0; r < g.height; r++) {
+          // grid row 0 is the map's lowest y; an image's row 0 is its top
+          const base = (g.height - 1 - r) * g.width;
+          for (let c = 0; c < g.width; c++) {
+            const v = raw.charCodeAt(r * g.width + c);
+            if (v === 255) { out[base + c] = CELL.unknown; continue; }
+            out[base + c] = v >= 65 ? CELL.wall : v <= 25 ? CELL.free : CELL.unsure;
+            if (c < minC) minC = c; if (c > maxC) maxC = c;
+            if (r < minR) minR = r; if (r > maxR) maxR = r;
+          }
+        }
+        ictx.putImageData(pixels, 0, 0);
+        if (maxC < 0) { minC = 0; maxC = g.width - 1; minR = 0; maxR = g.height - 1; }
+        const res = g.resolution;
+        if (mapGrid && mapGrid.frame_id !== g.frame_id) trail.length = 0;
+        mapGrid = {seq: g.seq, frame_id: g.frame_id, width: g.width, height: g.height, resolution: res,
+                   origin: g.origin, img,
+                   bounds: {minX: g.origin.x + minC * res, maxX: g.origin.x + (maxC + 1) * res,
+                            minY: g.origin.y + minR * res, maxY: g.origin.y + (maxR + 1) * res}};
+        draw();
+      } catch (_) { /* retried on the next poll */ }
+      finally { gridBusy = false; }
+    }
+    function drawMap() {
+      const {w, h, cx, cy} = dimensions();
+      ctx.fillStyle = C.bg; ctx.fillRect(0, 0, w, h);
+      const g = mapGrid;
+      if (!g) return;
+      const pose = mapInfo && mapInfo.pose && mapInfo.pose.x != null ? mapInfo.pose : null;
+      let vx, vy, scale;
+      if (mapFit || !pose) {            // everything mapped so far
+        const b = g.bounds;
+        vx = (b.minX + b.maxX) / 2; vy = (b.minY + b.maxY) / 2;
+        scale = Math.min(w / Math.max(b.maxX - b.minX, 1), h / Math.max(b.maxY - b.minY, 1)) * 0.92;
+      } else {                          // follow the robot at the chosen range
+        vx = pose.x; vy = pose.y;
+        scale = Math.min(w, h) * 0.46 / Number(rangeSlider.value);
+      }
+      // Map frame, drawn fixed: +x to the right, +y up.
+      const at = (x, y) => [cx + (x - vx) * scale, cy - (y - vy) * scale];
+      const [ix, iy] = at(g.origin.x, g.origin.y + g.height * g.resolution);
+      ctx.imageSmoothingEnabled = false;
+      ctx.drawImage(g.img, ix, iy, g.width * g.resolution * scale, g.height * g.resolution * scale);
+
+      if (trail.length > 1) {
+        ctx.strokeStyle = C.trail; ctx.lineWidth = 1.5; ctx.setLineDash([2, 4]);
+        ctx.beginPath();
+        trail.forEach(([x, y], i) => { const [sx, sy] = at(x, y); if (i) ctx.lineTo(sx, sy); else ctx.moveTo(sx, sy); });
+        ctx.stroke(); ctx.setLineDash([]);
+      }
+      const sp = mapInfo && mapInfo.scan_pose;
+      if (scan && sp && sp.x != null) {
+        ctx.fillStyle = scan.age > SCAN_STALE_S ? C.pointStale : C.point;
+        ctx.beginPath();
+        for (let i = 0; i < scan.ranges.length; i++) {
+          const r = scan.ranges[i];
+          if (r === null || !Number.isFinite(r) || r < scan.range_min || r > scan.range_max) continue;
+          const angle = sp.yaw + scan.angle_min + i * scan.angle_increment;
+          const [x, y] = at(sp.x + Math.cos(angle) * r, sp.y + Math.sin(angle) * r);
+          ctx.moveTo(x + 1.6, y); ctx.arc(x, y, 1.6, 0, Math.PI * 2);
+        }
+        ctx.fill();
+      }
+      const goal = telemetry && telemetry.mission.goal;
+      if (goal && goal.x != null && goal.frame_id === g.frame_id) {
+        const [gx, gy] = at(goal.x, goal.y);
+        ctx.strokeStyle = ctx.fillStyle = C.goal; ctx.lineWidth = 2;
+        ctx.beginPath(); ctx.arc(gx, gy, 8, 0, Math.PI * 2);
+        ctx.moveTo(gx - 4, gy); ctx.lineTo(gx + 4, gy); ctx.moveTo(gx, gy - 4); ctx.lineTo(gx, gy + 4); ctx.stroke();
+        ctx.font = '600 12px system-ui'; ctx.fillText('goal', gx + 12, gy + 4);
+      }
+      const flame = telemetry && telemetry.flame;
+      if (pose && flameActive(flame)) {
+        const known = flame.distance_m != null;
+        const reach = known ? flame.distance_m : 2, angle = pose.yaw + flame.bearing_rad;
+        const [px, py] = at(pose.x, pose.y);
+        const [fx, fy] = at(pose.x + Math.cos(angle) * reach, pose.y + Math.sin(angle) * reach);
+        ctx.strokeStyle = ctx.fillStyle = C.flame; ctx.lineWidth = 2;
+        ctx.setLineDash([6, 4]);
+        ctx.beginPath(); ctx.moveTo(px, py); ctx.lineTo(fx, fy); ctx.stroke();
+        ctx.setLineDash([]);
+        if (known) { ctx.beginPath(); ctx.arc(fx, fy, 6, 0, Math.PI * 2); ctx.fill(); }
+        ctx.font = '600 12px system-ui';
+        ctx.fillText(known ? `flame ${flame.distance_m.toFixed(2)} m` : 'flame', fx + 10, fy + 4);
+      }
+      if (pose) { const [px, py] = at(pose.x, pose.y); drawRobot(px, py, Math.PI / 2 - pose.yaw); }
+
+      // scale bar
+      const metres = [0.5, 1, 2, 5, 10, 20, 50].find(m => m * scale >= 60) || 100;
+      ctx.strokeStyle = ctx.fillStyle = C.label; ctx.lineWidth = 2; ctx.font = '11px system-ui';
+      ctx.beginPath(); ctx.moveTo(14, h - 14); ctx.lineTo(14 + metres * scale, h - 14); ctx.stroke();
+      ctx.fillText(`${metres} m`, 14, h - 20);
     }
     function project(point, distance, right, up, direction, cx, cy, focal) {
       const depth = distance - (point[0]*direction[0] + point[1]*direction[1] + point[2]*direction[2]);
@@ -1045,15 +1352,120 @@ PAGE = r"""<!doctype html>
       ctx.fillStyle = '#ffdf9e'; ctx.textAlign = 'center';
       ctx.fillText(scanNote, w / 2, 29); ctx.textAlign = 'start';
     }
-    function draw() { if (mode === '2d') draw2d(); else draw3d(); drawNote(); }
+    function draw() {
+      if (mode === '2d') draw2d(); else if (mode === '3d') draw3d(); else drawMap();
+      drawNote();
+    }
     function setMode(next) {
       mode = next; store.set('mode', mode);
       $('twoD').setAttribute('aria-pressed', String(mode === '2d'));
       $('threeD').setAttribute('aria-pressed', String(mode === '3d'));
-      // Only the 3D view takes over drag and scroll; top-down lets the page scroll past.
+      $('mapView').setAttribute('aria-pressed', String(mode === 'map'));
+      $('fitMap').hidden = mode !== 'map';
+      $('fitMap').setAttribute('aria-pressed', String(mapFit));
+      rangeSlider.disabled = mode === 'map' && mapFit;
+      // Only the 3D view takes over drag and scroll; the others let the page scroll past.
       canvas.classList.toggle('orbit', mode === '3d');
-      setText('viewTip', mode === '3d' ? 'drag to orbit · scroll to zoom' : 'forward is up');
-      draw(); pollScan();
+      setText('viewTitle', TITLES[mode]);
+      setText('viewTip', mode === '3d' ? 'drag to orbit · scroll to zoom'
+        : mode === 'map' ? 'map frame · +x right, +y up' : 'forward is up');
+      scanNote = ''; draw(); pollScan();
+    }
+
+    // ---------- thermal camera ----------
+    const RAMP = ['#000004', '#320a5e', '#781c6d', '#bc3754', '#ed6925', '#fbb61a', '#fcffa4']
+      .map(hex => [1, 3, 5].map(i => parseInt(hex.slice(i, i + 2), 16)));
+    function ramp(t) {
+      const f = Math.max(0, Math.min(1, t)) * (RAMP.length - 1);
+      const i = Math.min(RAMP.length - 2, Math.floor(f)), k = f - i;
+      return `rgb(${RAMP[i].map((v, j) => Math.round(v + (RAMP[i + 1][j] - v) * k)).join(',')})`;
+    }
+    function thermalScale() {
+      const lo = Math.floor(thermal.min);
+      return [lo, Math.max(Math.ceil(thermal.max), lo + THERMAL_MIN_SPAN_C)];
+    }
+    function drawThermal() {
+      const view = $('thermal'), g = view.getContext('2d');
+      const rect = view.getBoundingClientRect(), dpr = window.devicePixelRatio || 1;
+      const width = Math.max(1, Math.round(rect.width * dpr)), height = Math.max(1, Math.round(rect.height * dpr));
+      if (view.width !== width || view.height !== height) { view.width = width; view.height = height; }
+      g.setTransform(dpr, 0, 0, dpr, 0, 0);
+      const w = rect.width, h = rect.height;
+      g.fillStyle = C.bg; g.fillRect(0, 0, w, h);
+      if (!thermal) return;
+      const cols = thermal.width, rows = thermal.height, cw = w / cols, ch = h / rows;
+      const [lo, hi] = thermalScale();
+      let hot = 0;
+      // One flat square per sensor pixel: the sensor is 16x12, and smoothing would invent detail.
+      for (let i = 0; i < thermal.temps.length; i++) {
+        const v = thermal.temps[i];
+        if (v == null) continue;
+        if (thermal.temps[hot] == null || v > thermal.temps[hot]) hot = i;
+        const c = i % cols, r = Math.floor(i / cols);
+        g.fillStyle = ramp((v - lo) / (hi - lo));
+        g.fillRect(Math.floor(c * cw), Math.floor(r * ch), Math.ceil(cw), Math.ceil(ch));
+      }
+      const mark = (i, colour) => {
+        // dark under light, so the outline shows on both hot and cold pixels
+        for (const [stroke, width] of [['#0a0d10', 4], [colour, 2]]) {
+          g.strokeStyle = stroke; g.lineWidth = width;
+          g.strokeRect((i % cols) * cw + 2, Math.floor(i / cols) * ch + 2, cw - 4, ch - 4);
+        }
+      };
+      mark(hot, '#ffffff');
+      if (thermalHover != null && thermalHover !== hot) mark(thermalHover, '#7cc4ff');
+      if (thermal.age > SCAN_STALE_S) {
+        g.fillStyle = 'rgba(10, 13, 16, .65)'; g.fillRect(0, 0, w, h);
+        g.fillStyle = '#ffdf9e'; g.font = '600 13px system-ui'; g.textAlign = 'center';
+        g.fillText(`Thermal stale · last frame ${fmtAge(thermal.age)} ago`, w / 2, h / 2); g.textAlign = 'start';
+      }
+    }
+    function renderThermal() {
+      if (!thermal) {
+        setText('thermalHint', 'no frames yet');
+        setText('thermalLo', ''); setText('thermalHi', '');
+        setHtml('thermalKv', kv([['Status', '<span class="empty">waiting for the thermal node…</span>']]));
+        drawThermal();
+        return;
+      }
+      $('thermalStage').style.aspectRatio = `${thermal.width} / ${thermal.height}`;
+      const [lo, hi] = thermalScale();
+      setText('thermalLo', `${lo} °C`); setText('thermalHi', `${hi} °C`);
+      const hovered = thermalHover != null ? thermal.temps[thermalHover] : null;
+      setText('thermalHint', hovered != null ? `pixel ${hovered.toFixed(1)} °C`
+        : thermal.age > SCAN_STALE_S ? `last frame ${fmtAge(thermal.age)} ago`
+        : `${thermal.width}×${thermal.height} · live`);
+      setHtml('thermalKv', kv([
+        ['Hottest', `${thermal.max.toFixed(1)} °C`],
+        ['Mean', `${thermal.mean.toFixed(1)} °C`],
+        ['Coolest', `${thermal.min.toFixed(1)} °C`],
+      ]));
+      drawThermal();
+    }
+    async function pollThermal() {
+      if (!features || !features.thermal || !thermalShown || thermalBusy || document.hidden) return;
+      thermalBusy = true;
+      try {
+        thermal = (await getJson('/api/thermal')).thermal;
+        renderThermal();
+      } catch (_) { /* the offline banner already says so */ }
+      finally { thermalBusy = false; }
+    }
+    function showThermal(shown) {
+      thermalShown = shown; store.set('thermal', shown ? '1' : '0');
+      $('thermalBody').hidden = !shown;
+      $('thermalToggle').textContent = shown ? 'Hide' : 'Show';
+      $('thermalToggle').setAttribute('aria-expanded', String(shown));
+      if (shown) { renderThermal(); pollThermal(); } else setText('thermalHint', 'not streaming');
+    }
+    // The server says which optional feeds it was started with.
+    function applyFeatures(next) {
+      if (features && features.thermal === next.thermal && features.map === next.map) return;
+      features = next;
+      $('thermalCard').hidden = !features.thermal;
+      $('mapView').hidden = !features.map;
+      if (features.thermal) showThermal(thermalShown);
+      if (!features.map && mode === 'map') setMode('2d');
     }
 
     // ---------- panels ----------
@@ -1235,6 +1647,7 @@ PAGE = r"""<!doctype html>
         const d = await getJson('/api/telemetry');
         telemetry = d; offline = null; lastOk = new Date();
         document.body.classList.remove('offline');
+        applyFeatures(d.features || {thermal: false, map: false});
         renderAlerts(d); renderTiles(d); renderMission(d); renderBeacon(d); renderEsp(d);
         renderOdom(d); renderTopics(d); renderEvents(d);
       } catch (err) {
@@ -1249,6 +1662,7 @@ PAGE = r"""<!doctype html>
       if (pollBusy) return;
       pollBusy = true;
       try {
+        if (mode === 'map') { await pollMap(); return; }
         const data = await getJson(mode === '2d' ? '/api/scan' : '/api/cloud');
         if (mode === '2d') scan = data.scan;
         else { cloud = data.cloud; scan = data.scan; }
@@ -1264,13 +1678,47 @@ PAGE = r"""<!doctype html>
         draw();
       } catch (err) {
         setText('scanHint', `error: ${err.message}`);
-        scanNote = 'LiDAR view frozen · dashboard offline'; draw();
+        scanNote = `${TITLES[mode]} view frozen · dashboard offline`; draw();
       } finally { pollBusy = false; }
+    }
+    async function pollMap() {
+      const [info, scanData] = await Promise.all([getJson('/api/map'), getJson('/api/scan')]);
+      mapInfo = info; scan = scanData.scan;
+      const g = info.grid, pose = info.pose;
+      if (g && (!mapGrid || mapGrid.seq !== g.seq)) loadGrid();
+      if (pose && pose.x != null) {
+        const last = trail[trail.length - 1];
+        if (!last || Math.hypot(pose.x - last[0], pose.y - last[1]) > 0.05) {
+          trail.push([pose.x, pose.y]);
+          if (trail.length > 3000) trail.shift();
+        }
+      }
+      setText('scanHint', !g ? 'no map'
+        : `${g.width}×${g.height} cells · ${g.resolution.toFixed(2)} m/cell · map updated ${ago(g.age)}`);
+      scanNote = !g ? 'Waiting for a map'
+        : !pose ? `Robot not located · no ${g.frame_id} → ${info.base_frame} transform`
+        : pose.age != null && pose.age > POSE_STALE_S ? `Robot pose stale · ${fmtAge(pose.age)} old`
+        : '';
+      draw();
     }
 
     // ---------- wiring ----------
     $('twoD').addEventListener('click', () => setMode('2d'));
     $('threeD').addEventListener('click', () => setMode('3d'));
+    $('mapView').addEventListener('click', () => setMode('map'));
+    $('fitMap').addEventListener('click', () => {
+      mapFit = !mapFit; store.set('mapFit', mapFit ? '1' : '0'); setMode('map');
+    });
+    $('thermalToggle').addEventListener('click', () => showThermal(!thermalShown));
+    $('thermal').addEventListener('pointermove', e => {
+      if (!thermal) return;
+      const rect = e.currentTarget.getBoundingClientRect();
+      const c = Math.min(thermal.width - 1, Math.max(0, Math.floor((e.clientX - rect.left) / rect.width * thermal.width)));
+      const r = Math.min(thermal.height - 1, Math.max(0, Math.floor((e.clientY - rect.top) / rect.height * thermal.height)));
+      thermalHover = r * thermal.width + c; renderThermal();
+    });
+    $('thermal').addEventListener('pointerleave', () => { thermalHover = null; renderThermal(); });
+    new ResizeObserver(drawThermal).observe($('thermalStage'));
     $('alertsOnly').addEventListener('click', e => {
       alertsOnly = !alertsOnly; store.set('alertsOnly', alertsOnly ? '1' : '0');
       e.currentTarget.setAttribute('aria-pressed', String(alertsOnly));
@@ -1305,6 +1753,7 @@ PAGE = r"""<!doctype html>
     setMode(mode); pollTelemetry();
     setInterval(pollScan, 200);
     setInterval(pollTelemetry, 400);
+    setInterval(pollThermal, 250);
     setInterval(renderConn, 1000);
   })();
   </script>
@@ -1319,6 +1768,7 @@ def make_handler(node: RobotDashboard):
     class Handler(BaseHTTPRequestHandler):
         def do_GET(self) -> None:
             path = urlsplit(self.path).path
+            encoding = None
             if path == "/":
                 body = PAGE.encode("utf-8")
                 content_type = "text/html; charset=utf-8"
@@ -1334,6 +1784,23 @@ def make_handler(node: RobotDashboard):
                     allow_nan=False,
                 ).encode("utf-8")
                 content_type = "application/json"
+            elif path == "/api/thermal":
+                body = json.dumps({"thermal": node.thermal_snapshot()},
+                                  allow_nan=False).encode("utf-8")
+                content_type = "application/json"
+            elif path == "/api/map":
+                body = json.dumps(node.map_snapshot(), allow_nan=False).encode("utf-8")
+                content_type = "application/json"
+            elif path == "/api/map/grid":
+                body = node.grid_body()
+                if body is None:
+                    self.send_error(404, "no map received yet")
+                    return
+                content_type = "application/json"
+                if "gzip" in self.headers.get("Accept-Encoding", ""):
+                    encoding = "gzip"
+                else:
+                    body = gzip.decompress(body)
             elif path == "/api/telemetry":
                 body = json.dumps(node.telemetry_snapshot(), allow_nan=False).encode("utf-8")
                 content_type = "application/json"
@@ -1347,6 +1814,8 @@ def make_handler(node: RobotDashboard):
             self.send_response(200)
             self.send_header("Content-Type", content_type)
             self.send_header("Content-Length", str(len(body)))
+            if encoding:
+                self.send_header("Content-Encoding", encoding)
             self.send_header("Cache-Control", "no-store")
             self.send_header("X-Content-Type-Options", "nosniff")
             self.end_headers()
@@ -1375,6 +1844,14 @@ def parse_args() -> argparse.Namespace:
         "--max-cloud-points", type=int, default=5000,
         help="Maximum PointCloud2 points retained for the browser (default: 5000)",
     )
+    parser.add_argument("--thermal-topic", default="/thermal/image",
+                        help="Thermal camera Image topic, 32FC1 in deg C "
+                             "(default: /thermal/image; '' disables the thermal view)")
+    parser.add_argument("--map-topic", default="/map",
+                        help="OccupancyGrid from SLAM Toolbox or map_server "
+                             "(default: /map; '' disables the map view)")
+    parser.add_argument("--base-frame", default="base_link",
+                        help="Robot frame located on the map through TF (default: base_link)")
     parser.add_argument("--beacon-topic", default="/beacon_event",
                         help="BeaconEvent topic (default: /beacon_event)")
     parser.add_argument("--flame-topic", default="/flame_event",

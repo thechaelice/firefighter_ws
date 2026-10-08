@@ -64,7 +64,7 @@ The robot is built with a dual-controller architecture:
 | **LiDAR Driver** | RPLiDAR + `sllidar_ros2` | ✅ Implemented | Reads LiDAR data and publishes `/scan` topic |
 | **Laser Odometry** | `rf2o_laser_odometry` | ✅ Implemented | Computes planar odometry (`/odom_rf2o`, `odom → base_link` TF) |
 | **Live LiDAR Terminal Viewer** | `scripts/ascii_lidar_view.py` | ✅ Implemented | Headless polar ASCII radar visualizer for `/scan` |
-| **Operations Dashboard** | `scripts/robot_dashboard.py` | ✅ Implemented | One web page: LiDAR 2D/3D, beacon alerts + RSSI, ESP32 link/mode/e-stop, mission state, odometry, per-topic rates, event log |
+| **Operations Dashboard** | `scripts/robot_dashboard.py` | ✅ Implemented | One web page: LiDAR 2D/3D, optional SLAM map and thermal camera feeds, beacon alerts + RSSI, ESP32 link/mode/e-stop, mission state, odometry, per-topic rates, event log |
 | **Motor Bench Test** | `scripts/motor_test.py` | ✅ Implemented | Drives the motors from the Pi via `/cmd_vel` (scripted or keyboard) with `/wheel_odom` feedback |
 | **Thermal Frame Capture/Render** | `scripts/thermal_frames.py` + `scripts/thermal/` | ✅ Implemented | Captures Melexis **MLX90641** frames and renders PNG heat maps (see [`docs/thermal-camera.md`](docs/thermal-camera.md)) |
 | **Pi ↔ ESP32 Serial Bridge** | `firefighter_bridge` (ament_python) | ✅ Implemented | Framed UART link: `/cmd_vel` → `SET_TWIST`, wheel odom, beacon events (see [`src/firefighter_bridge/`](src/firefighter_bridge/README.md)) |

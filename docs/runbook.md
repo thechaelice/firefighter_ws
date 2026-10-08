@@ -161,6 +161,28 @@ If the page loses the dashboard server it says `DASHBOARD OFFLINE` and dims
 every panel - the values underneath are the last ones received, not live. The
 LiDAR view is labelled the same way when `/scan` stops arriving.
 
+Two optional live feeds are on by default and cost nothing until they are on
+screen - the page only fetches them while they are showing:
+
+- **Thermal camera** - the `/thermal/image` frame (16x12, deg C) as a heat map
+  with the hottest pixel outlined; hover a pixel for its temperature. **Hide**
+  on the card stops the stream.
+- **Map** - a third view next to *Top-down* and *3D*: the `/map` occupancy grid
+  from SLAM Toolbox (or `map_server` when `slam:=false`) with the robot, its
+  trail, the live scan, the mission goal and the flame bearing drawn on it.
+  It follows the robot at the chosen range; **Whole map** fits everything
+  mapped so far. The robot is placed with the `map -> base_link` transform, so
+  the view says so when that transform is missing or stale.
+
+To leave either out entirely, start the server with an empty topic:
+
+```bash
+python3 scripts/robot_dashboard.py --thermal-topic "" --map-topic ""
+```
+
+`--thermal-topic`, `--map-topic` and `--base-frame` also point them at other
+names.
+
 For volumetric LiDAR data, pass a `PointCloud2` topic such as:
 
 ```bash
