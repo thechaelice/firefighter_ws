@@ -135,28 +135,35 @@ Then open <https://studio.foxglove.dev/> in a browser, connect to `ws://<pi-ip>:
 cd ~/firefighter_ws && source install/setup.bash && python3 scripts/ascii_lidar_view.py
 ```
 
-### Browser-based 2D / 3D viewer
+### Operations dashboard (browser)
 
 Run the server on the Pi after sourcing the ROS 2 workspace:
 
 ```bash
 cd ~/firefighter_ws && source install/setup.bash
-python3 scripts/lidar_web_viewer.py
+python3 scripts/robot_dashboard.py
 ```
 
 From a browser on the same trusted network, open `http://<pi-ip>:8080/`.
-The 2D panel subscribes to `/scan` by default. For volumetric data, pass a
-`PointCloud2` topic such as:
+
+The page shows the LiDAR scan (2D, plus an optional 3D view) alongside the
+robot's operational state: beacon alerts with RSSI and an estimated range, the
+mobility ESP32's link / mode / e-stop flags, the mission FSM state and
+suppression, wheel (`/wheel_odom`) vs laser (`/odom_rf2o`) odometry, a per-topic
+rate and freshness table, and a rolling event log.
+
+For volumetric LiDAR data, pass a `PointCloud2` topic such as:
 
 ```bash
-python3 scripts/lidar_web_viewer.py --pointcloud-topic /points
+python3 scripts/robot_dashboard.py --pointcloud-topic /points
 ```
 
 This RPLIDAR publishes planar `LaserScan` data; its 3D view is therefore flat
-unless another node publishes a `PointCloud2`. Use `--scan-topic`, `--port`,
-and `--max-cloud-points` to override the defaults. The server binds to all
-network interfaces on port 8080 and has no authentication, so only run it on a
-trusted network.
+unless another node publishes a `PointCloud2`. Every watched topic can be
+overridden (`--scan-topic`, `--beacon-topic`, `--odom-topic`,
+`--diagnostics-topic`, ...) - run with `--help` for the full list. The server
+binds to all network interfaces on port 8080 and has no authentication, so only
+run it on a trusted network.
 
 ### Tweakable parameters
 

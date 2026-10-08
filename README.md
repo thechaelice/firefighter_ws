@@ -64,7 +64,8 @@ The robot is built with a dual-controller architecture:
 | **LiDAR Driver** | RPLiDAR + `sllidar_ros2` | ✅ Implemented | Reads LiDAR data and publishes `/scan` topic |
 | **Laser Odometry** | `rf2o_laser_odometry` | ✅ Implemented | Computes planar odometry (`/odom_rf2o`, `odom → base_link` TF) |
 | **Live LiDAR Terminal Viewer** | `scripts/ascii_lidar_view.py` | ✅ Implemented | Headless polar ASCII radar visualizer for `/scan` |
-| **LiDAR Web Viewer** | `scripts/lidar_web_viewer.py` | ✅ Implemented | Browser-based 2D `/scan` and optional 3D `PointCloud2` visualization |
+| **Operations Dashboard** | `scripts/robot_dashboard.py` | ✅ Implemented | One web page: LiDAR 2D/3D, beacon alerts + RSSI, ESP32 link/mode/e-stop, mission state, odometry, per-topic rates, event log |
+| **Motor Bench Test** | `scripts/motor_test.py` | ✅ Implemented | Drives the motors from the Pi via `/cmd_vel` (scripted or keyboard) with `/wheel_odom` feedback |
 | **Thermal Frame Capture/Render** | `scripts/thermal_frames.py` + `scripts/thermal/` | ✅ Implemented | Captures Melexis **MLX90641** frames and renders PNG heat maps (see [`docs/thermal-camera.md`](docs/thermal-camera.md)) |
 | **Pi ↔ ESP32 Serial Bridge** | `firefighter_bridge` (ament_python) | ✅ Implemented | Framed UART link: `/cmd_vel` → `SET_TWIST`, wheel odom, beacon events (see [`src/firefighter_bridge/`](src/firefighter_bridge/README.md)) |
 | **Mission Behaviour FSM** | `firefighter_mission` (ament_python) | ✅ Implemented | `beacon → navigate → search → suppress → verify` state machine, e-stop, bounded timeouts (see [`src/firefighter_mission/`](src/firefighter_mission/README.md)) |
@@ -168,23 +169,55 @@ For headless debugging over SSH:
 python3 scripts/ascii_lidar_view.py
 ```
 
-### 5. Optional: Browser LiDAR Viewer
+### 5. Optional: Operations Dashboard (browser)
 
-Start the web server on the Raspberry Pi:
+`scripts/robot_dashboard.py` serves a single page with everything the robot is
+doing: the live LiDAR scan (2D and optional 3D), beacon alerts with RSSI and an
+estimated range, the mobility ESP32's link/mode/e-stop state, the mission FSM
+state and suppression, wheel vs laser odometry, a per-topic rate and freshness
+table, and a rolling event log.
 
 ```bash
-python3 scripts/lidar_web_viewer.py
+cd ~/firefighter_ws && source install/setup.bash
+python3 scripts/robot_dashboard.py
 ```
 
-Open `http://<pi-ip>:8080/` from a browser on the same network. The 2D view
-uses `/scan`; the 3D view can also display a `PointCloud2` topic when configured:
+Open `http://<pi-ip>:8080/` from a browser on the same network. The 3D view can
+display a `PointCloud2` topic when configured:
 
 ```bash
-python3 scripts/lidar_web_viewer.py --pointcloud-topic /points
+python3 scripts/robot_dashboard.py --pointcloud-topic /points
 ```
 
 The RPLIDAR publishes planar `LaserScan` data, so without a `PointCloud2` topic
-the 3D view shows the scan as a flat plane. The web server has no authentication;
-use it only on a trusted network.
+the 3D view shows the scan as a flat plane. The server has no authentication and
+binds to all interfaces; use it only on a trusted network.
+
+### 6. Optional: Drive the Motors (bench test)
+
+`scripts/motor_test.py` is a bring-up tool for the drive train. It publishes
+`/cmd_vel`, which `firefighter_bridge` streams to the ESP32 as `SET_TWIST`, and
+reports `/wheel_odom` back so you can see the wheels turning.
+
+```bash
+cd ~/firefighter_ws && source install/setup.bash
+
+# creep forward for 2 s, then stop
+python3 scripts/motor_test.py --linear 0.10 --duration 2
+
+# spin in place
+python3 scripts/motor_test.py --angular 0.5 --duration 3
+
+# keyboard driving: w/s = speed, a/d = turn, space = stop, q = quit
+python3 scripts/motor_test.py --interactive
+```
+
+> **Stop `firefighter_mission` first.** It also publishes `/cmd_vel`, so the two
+> will fight over the motors.
+
+Put the robot on blocks for the first run. Zero is published on every exit path,
+and killing the script stops the robot anyway (the bridge zeros stale commands
+after `cmd_timeout_s`, and the ESP32 stops itself after `PI_TIMEOUT_MS`).
+Add `--estop` to latch a stop on the ESP32 when the test finishes.
 
 For detailed setup, troubleshooting, and port configuration, refer to [`docs/runbook.md`](docs/runbook.md).
