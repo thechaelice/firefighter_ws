@@ -150,7 +150,14 @@ The page shows the LiDAR scan (2D, plus an optional 3D view) alongside the
 robot's operational state: beacon alerts with RSSI and an estimated range, the
 mobility ESP32's link / mode / e-stop flags, the mission FSM state and
 suppression, wheel (`/wheel_odom`) vs laser (`/odom_rf2o`) odometry, a per-topic
-rate and freshness table, and a rolling event log.
+rate and freshness table, and a rolling event log. Anything that needs attention
+is raised as a banner at the top: fire / smoke, a latched e-stop, an encoder
+fault, a stale or down ESP32 link, an aborted mission. While a flame is being
+tracked, its bearing and range are drawn on the 2D scan.
+
+If the page loses the dashboard server it says `DASHBOARD OFFLINE` and dims
+every panel - the values underneath are the last ones received, not live. The
+LiDAR view is labelled the same way when `/scan` stops arriving.
 
 For volumetric LiDAR data, pass a `PointCloud2` topic such as:
 

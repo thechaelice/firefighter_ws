@@ -142,7 +142,9 @@ class RobotDashboard(Node):
     def __init__(self, args: argparse.Namespace) -> None:
         super().__init__("robot_dashboard")
 
-        self._lock = threading.Lock()
+        # Re-entrant: _log_event takes it too, and is called with it held.
+        self._lock = threading.RLock()
+        self._event_seq = 0
         self._max_cloud_points = args.max_cloud_points
 
         self._scan: dict | None = None
@@ -223,9 +225,12 @@ class RobotDashboard(Node):
         )
 
     def _log_event(self, source: str, level: str, text: str) -> None:
-        self._events.append(
-            {"t": time.time(), "source": source, "level": level, "text": text}
-        )
+        with self._lock:
+            self._event_seq += 1
+            self._events.append(
+                {"id": self._event_seq, "at": time.monotonic(), "source": source,
+                 "level": level, "text": text}
+            )
 
     # ------------------------------------------------------------------
     # Callbacks
@@ -235,7 +240,7 @@ class RobotDashboard(Node):
         with self._lock:
             self._scan = {
                 "frame_id": msg.header.frame_id,
-                "received_at": time.time(),
+                "at": time.monotonic(),
                 "angle_min": float(msg.angle_min),
                 "angle_increment": float(msg.angle_increment),
                 "range_min": float(msg.range_min),
@@ -287,7 +292,7 @@ class RobotDashboard(Node):
         with self._lock:
             self._cloud = {
                 "frame_id": msg.header.frame_id,
-                "received_at": time.time(),
+                "at": time.monotonic(),
                 "points": points,
             }
 
@@ -307,6 +312,9 @@ class RobotDashboard(Node):
                 "mac": _format_mac(msg.mac),
                 "count": (previous["count"] if previous else 0) + 1,
             }
+        # Beacons repeat while the alarm lasts; log the transitions, not every packet.
+        if previous and (previous["fire"], previous["smoke"]) == (fire, smoke):
+            return
         alerts = "+".join(name for name, flag in (("FIRE", fire), ("SMOKE", smoke)) if flag)
         level = "alert" if fire else ("warn" if smoke else "ok")
         suffix = f" rssi -{rssi} dBm" if rssi else ""
@@ -317,9 +325,11 @@ class RobotDashboard(Node):
 
     def _on_flame(self, msg) -> None:
         state = int(msg.state)
-        names = {0: "FLAME_FOUND", 1: "FLAME_LOST", 2: "FLAME_EXTINGUISHED", 3: "IN_RANGE"}
+        names = {0: "FLAME_FOUND", 1: "FLAME_LOST", 2: "FLAME_EXTINGUISHED",
+                 3: "IN_SUPPRESSION_RANGE"}
         name = names.get(state, f"STATE_{state}")
         with self._lock:
+            previous = self._flame
             self._flame = {
                 "at": time.monotonic(),
                 "state": state,
@@ -327,7 +337,9 @@ class RobotDashboard(Node):
                 "bearing_rad": _finite(msg.bearing_rad),
                 "distance_m": _finite(msg.distance_m),
             }
-        self._log_event("thermal", "info", f"flame event: {name}")
+        # Perception publishes one FlameEvent per thermal frame; log state changes only.
+        if previous is None or previous["state"] != state:
+            self._log_event("thermal", "info", f"flame event: {name}")
 
     def _on_wheel_odom(self, msg: Odometry) -> None:
         pose = msg.pose.pose
@@ -431,13 +443,23 @@ class RobotDashboard(Node):
     # ------------------------------------------------------------------
     # Snapshots
     # ------------------------------------------------------------------
+    @staticmethod
+    def _with_age(sample: dict | None) -> dict | None:
+        # Ages are computed here, on the robot's monotonic clock, so the page
+        # never has to compare the browser's wall clock with the Pi's.
+        if sample is None:
+            return None
+        view = dict(sample)
+        view["age"] = _age(view.pop("at"))
+        return view
+
     def scan_snapshot(self) -> dict | None:
         with self._lock:
-            return self._scan
+            return self._with_age(self._scan)
 
     def cloud_snapshot(self) -> dict | None:
         with self._lock:
-            return self._cloud
+            return self._with_age(self._cloud)
 
     def telemetry_snapshot(self) -> dict:
         with self._lock:
@@ -449,7 +471,7 @@ class RobotDashboard(Node):
             mission = dict(self._mission)
             battery = dict(self._battery) if self._battery else None
             diagnostics = [dict(value) for value in self._diagnostics.values()]
-            events = list(self._events)
+            events = [self._with_age(event) for event in self._events]
             topics = [stats.snapshot() for stats in self._stats.values()]
 
         esp32 = next(
@@ -574,11 +596,13 @@ PAGE = r"""<!doctype html>
     #conn { margin-left:auto; color:var(--muted); font-variant-numeric: tabular-nums; }
     #conn.error { color:var(--alert); }
     main { padding:14px; max-width:1400px; margin:0 auto; display:grid; gap:14px; }
-    .banner { display:none; align-items:center; gap:12px; padding:12px 16px; border-radius:8px;
-              font-weight:600; letter-spacing:.02em; }
-    .banner.show { display:flex; }
-    .banner.fire { background:#3d1512; border:1px solid #7f2a22; color:#ffb4ac; }
-    .banner.smoke { background:#33290c; border:1px solid #6d5a17; color:#ffdf9e; }
+    #alerts { display:grid; gap:8px; }
+    #alerts:empty { display:none; }
+    .banner { display:flex; flex-wrap:wrap; align-items:baseline; gap:4px 12px; padding:12px 16px;
+              border-radius:8px; font-weight:600; letter-spacing:.02em; }
+    .banner.fire, .banner.alert { background:#3d1512; border:1px solid #7f2a22; color:#ffb4ac; }
+    .banner.smoke, .banner.warn { background:#33290c; border:1px solid #6d5a17; color:#ffdf9e; }
+    body.offline .card { opacity:.5; }
     .banner .detail { font-weight:400; color:var(--muted); }
     .cards { display:grid; gap:14px; grid-template-columns:repeat(auto-fit, minmax(255px, 1fr)); }
     .split { display:grid; gap:14px; grid-template-columns:minmax(0, 2fr) minmax(0, 1fr); }
@@ -627,9 +651,9 @@ PAGE = r"""<!doctype html>
     td.right, th.right { text-align:right; }
     tr.stale td { color:var(--dim); }
     #events { list-style:none; margin:0; padding:0; max-height:340px; overflow:auto; }
-    #events li { display:grid; grid-template-columns:58px 1fr; gap:9px; padding:5px 0;
+    #events li { display:grid; grid-template-columns:84px 1fr; gap:9px; padding:5px 0;
                  border-bottom:1px solid #222a31; align-items:baseline; }
-    #events .t { color:var(--dim); font-family:ui-monospace, SFMono-Regular, Menlo, monospace; font-size:12px; }
+    #events .t { color:var(--dim); white-space:nowrap; font-family:ui-monospace, SFMono-Regular, Menlo, monospace; font-size:12px; }
     #events .src { color:var(--muted); font-size:11px; text-transform:uppercase; letter-spacing:.06em; }
     #events li.alert .txt { color:#ff9b8f; } #events li.warn .txt { color:#e5c05d; }
     #events li.ok .txt { color:#8fdc9f; }
@@ -646,7 +670,7 @@ PAGE = r"""<!doctype html>
     <span id="conn">Connecting…</span>
   </header>
   <main>
-    <div id="banner" class="banner"></div>
+    <div id="alerts" role="status" aria-live="polite"></div>
 
     <div class="cards">
       <div class="card">
@@ -712,6 +736,9 @@ PAGE = r"""<!doctype html>
     let azimuth = -0.7, elevation = 0.65, zoom = 1;
     let dragging = false, lastX = 0, lastY = 0;
     let pollBusy = false, telemetryBusy = false;
+    let telemetry = null, offline = null, lastOk = null, scanNote = '';
+    const FETCH_TIMEOUT_MS = 2500, SCAN_STALE_S = 2;
+    const eventTimes = new Map(), lastHtml = new Map();
 
     // ---------- formatting helpers ----------
     const esc = s => String(s ?? '').replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
@@ -734,6 +761,28 @@ PAGE = r"""<!doctype html>
     function kv(rows) {
       return rows.map(([k, v, cls]) =>
         `<dt>${esc(k)}</dt><dd class="${cls || ''}">${v}</dd>`).join('');
+    }
+    // Skip untouched DOM so scroll position and text selection survive a poll.
+    function setHtml(id, html) {
+      if (lastHtml.get(id) === html) return;
+      lastHtml.set(id, html); $(id).innerHTML = html;
+    }
+    async function getJson(url) {
+      try {
+        const res = await fetch(url, {cache: 'no-store', signal: AbortSignal.timeout(FETCH_TIMEOUT_MS)});
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        return await res.json();
+      } catch (err) {
+        throw new Error(err.name === 'TimeoutError' ? 'timed out' : err.message);
+      }
+    }
+    function flameActive(f) {
+      return !!f && f.bearing_rad != null && f.age != null && f.age < SCAN_STALE_S &&
+        (f.state_name === 'FLAME_FOUND' || f.state_name === 'IN_SUPPRESSION_RANGE');
+    }
+    function fmtBearing(rad) {
+      const deg = rad * 180 / Math.PI;
+      return `${Math.abs(deg).toFixed(0)}° ${deg >= 0 ? 'left' : 'right'}`;
     }
     function topicKind(age) { return age == null ? 'idle' : age <= 1.5 ? 'ok' : age <= 5 ? 'warn' : 'alert'; }
 
@@ -774,16 +823,42 @@ PAGE = r"""<!doctype html>
       ctx.fillText('+y left', cx + 7, cy - Math.min(h * 0.4, 50));
       if (!scan) return;
       const values = scan.ranges;
-      ctx.fillStyle = '#53d6a2';
+      ctx.fillStyle = scanNote ? '#3b6e5c' : '#53d6a2';
+      ctx.beginPath();
       for (let i = 0; i < values.length; i++) {
         const r = values[i];
         if (r === null || !Number.isFinite(r) || r < scan.range_min || r > radius) continue;
         const angle = scan.angle_min + i * scan.angle_increment;
         const x = cx + Math.cos(angle) * r * scale;
         const y = cy - Math.sin(angle) * r * scale;
-        ctx.beginPath(); ctx.arc(x, y, 2.2, 0, Math.PI * 2); ctx.fill();
+        ctx.moveTo(x + 2.2, y); ctx.arc(x, y, 2.2, 0, Math.PI * 2);
+      }
+      ctx.fill();
+      const flame = telemetry && telemetry.flame;
+      if (flameActive(flame)) {
+        // FlameEvent.bearing_rad is relative to the robot, +left - same as the scan.
+        const known = flame.distance_m != null && flame.distance_m <= radius;
+        const reach = known ? flame.distance_m : radius;
+        const fx = cx + Math.cos(flame.bearing_rad) * reach * scale;
+        const fy = cy - Math.sin(flame.bearing_rad) * reach * scale;
+        ctx.strokeStyle = ctx.fillStyle = '#ff6b35'; ctx.lineWidth = 2;
+        ctx.setLineDash([6, 4]);
+        ctx.beginPath(); ctx.moveTo(cx, cy); ctx.lineTo(fx, fy); ctx.stroke();
+        ctx.setLineDash([]);
+        if (known) { ctx.beginPath(); ctx.arc(fx, fy, 6, 0, Math.PI * 2); ctx.fill(); }
+        ctx.font = '12px system-ui';
+        ctx.fillText(known ? `flame ${flame.distance_m.toFixed(2)} m` : 'flame', fx + 10, fy + 4);
       }
       ctx.fillStyle = '#ffbf69'; ctx.beginPath(); ctx.arc(cx, cy, 4, 0, Math.PI * 2); ctx.fill();
+    }
+    function drawNote() {
+      if (!scanNote) return;
+      const {w} = dimensions();
+      ctx.font = '600 13px system-ui';
+      const width = ctx.measureText(scanNote).width + 20;
+      ctx.fillStyle = '#33290c'; ctx.fillRect((w - width) / 2, 10, width, 26);
+      ctx.fillStyle = '#ffdf9e'; ctx.textAlign = 'center';
+      ctx.fillText(scanNote, w / 2, 28); ctx.textAlign = 'start';
     }
     function project(point, distance, right, up, direction, cx, cy, focal) {
       const depth = distance - (point[0]*direction[0] + point[1]*direction[1] + point[2]*direction[2]);
@@ -842,23 +917,38 @@ PAGE = r"""<!doctype html>
         ctx.fillRect(p[0], p[1], 3, 3);
       }
     }
-    function draw() { if (mode === '2d') draw2d(); else draw3d(); }
+    function draw() { if (mode === '2d') draw2d(); else draw3d(); drawNote(); }
 
     // ---------- panels ----------
-    function renderBanner(d) {
-      const banner = $('banner');
-      const b = d.beacon;
-      let cls = '', text = '', detail = '';
+    function renderAlerts(d) {
+      const items = [];
+      if (offline) {
+        const since = lastOk ? `since ${lastOk.toLocaleTimeString()}` : 'yet';
+        items.push(['alert', 'DASHBOARD OFFLINE',
+          `${esc(offline)} · no telemetry ${since} · everything below is frozen`]);
+      }
+      const b = d && d.beacon, e = d && d.esp32, m = d && d.mission;
       if (b && (b.fire || b.smoke) && b.age != null && b.age < 60) {
-        cls = b.fire ? 'fire' : 'smoke';
-        text = b.fire ? 'FIRE DETECTED' : 'SMOKE DETECTED';
-        if (b.fire && b.smoke) text = 'FIRE + SMOKE DETECTED';
+        const text = b.fire && b.smoke ? 'FIRE + SMOKE DETECTED' : b.fire ? 'FIRE DETECTED' : 'SMOKE DETECTED';
         const where = b.mac ? ` · from ${esc(b.mac)}` : '';
         const rssi = b.rssi ? ` · rssi -${b.rssi} dBm` : '';
-        detail = `beacon #${b.message_number}${rssi}${where} · ${fmtAge(b.age)} ago`;
+        items.push([b.fire ? 'fire' : 'smoke', text,
+          `beacon #${b.message_number}${rssi}${where} · ${fmtAge(b.age)} ago`]);
       }
-      banner.className = 'banner' + (cls ? ` show ${cls}` : '');
-      banner.innerHTML = cls ? `${esc(text)} <span class="detail">${detail}</span>` : '';
+      if (e && e.estop) items.push(['alert', 'E-STOP LATCHED', 'reported by the mobility ESP32']);
+      if (e && e.encoder_fault) {
+        items.push(['alert', 'ENCODER FAULT', 'wheel speed control is off · wheels are running open-loop']);
+      }
+      if (e && e.age > 3) {
+        items.push(['warn', 'ESP32 STATUS STALE', `no /diagnostics from the bridge for ${fmtAge(e.age)}`]);
+      } else if (e && e.link_ok === false) {
+        items.push(['warn', 'ESP32 LINK DOWN', 'the mobility ESP32 reports its link to the Pi is down']);
+      }
+      if (m && String(m.state).toLowerCase() === 'aborted') {
+        items.push(['alert', 'MISSION ABORTED', 'only a reset leaves this state']);
+      }
+      setHtml('alerts', items.map(([kind, text, detail]) =>
+        `<div class="banner ${kind}">${esc(text)} <span class="detail">${detail}</span></div>`).join(''));
     }
 
     function renderBeacon(d) {
@@ -921,12 +1011,15 @@ PAGE = r"""<!doctype html>
 
     function renderMission(d) {
       const m = d.mission, badges = $('missionBadges');
-      const state = m.state;
+      // the FSM publishes lower-case state names ("idle", "aborted", ...)
+      const state = m.state ? String(m.state).toLowerCase() : null;
       const kind = !state ? 'idle'
-        : state === 'ABORTED' ? 'alert'
-        : /COMPLETE|IDLE/.test(state) ? 'idle'
+        : state === 'aborted' ? 'alert'
+        : state === 'suppressing' ? 'fire'
+        : state === 'complete' ? 'ok'
+        : state === 'idle' ? 'idle'
         : 'info';
-      badges.innerHTML = badge(state ?? 'no state yet', kind) +
+      badges.innerHTML = badge(state ? state.toUpperCase() : 'no state yet', kind) +
         (m.suppress === true ? badge('SUPPRESSING', 'alert') : badge('suppressor off', 'idle'));
       $('missionHint').textContent = state ? `${fmtAge(m.age)} ago` : 'published on change';
       const rows = [['State', esc(state ?? '—')]];
@@ -938,7 +1031,13 @@ PAGE = r"""<!doctype html>
       }
       rows.push(['Command', `v ${fmtNum(d.command.linear, 2)} m/s · ω ${fmtNum(d.command.angular, 2)} rad/s`, 'num']);
       rows.push(['Cmd seen', fmtAge(d.command.age), 'num']);
-      if (d.flame) rows.push(['Flame', esc(d.flame.state_name), 'num']);
+      if (d.flame) {
+        rows.push(['Flame', `${esc(d.flame.state_name)} · ${fmtAge(d.flame.age)} ago`, 'num']);
+        if (flameActive(d.flame)) {
+          const range = d.flame.distance_m == null ? 'range unknown' : `${fmtNum(d.flame.distance_m)} m`;
+          rows.push(['Flame at', `${fmtBearing(d.flame.bearing_rad)} · ${range}`, 'num']);
+        }
+      }
       $('missionKv').innerHTML = kv(rows);
     }
 
@@ -982,29 +1081,39 @@ PAGE = r"""<!doctype html>
     }
 
     function renderEvents(d) {
-      $('events').innerHTML = d.events.slice().reverse().map(e => {
-        const t = new Date(e.t * 1000).toLocaleTimeString();
+      // Stamp each event once, in browser time, from the age the robot reported.
+      const seen = new Set();
+      for (const e of d.events) {
+        seen.add(e.id);
+        if (!eventTimes.has(e.id)) eventTimes.set(e.id, new Date(Date.now() - e.age * 1000));
+      }
+      for (const id of eventTimes.keys()) if (!seen.has(id)) eventTimes.delete(id);
+      setHtml('events', d.events.slice().reverse().map(e => {
+        const t = eventTimes.get(e.id).toLocaleTimeString();
         return `<li class="${esc(e.level)}">
           <span class="t">${esc(t)}</span>
           <span><span class="src">${esc(e.source)}</span> <span class="txt">${esc(e.text)}</span></span>
         </li>`;
-      }).join('') || '<li class="empty">no events yet</li>';
+      }).join('') || '<li class="empty">no events yet</li>');
     }
 
     async function pollTelemetry() {
       if (telemetryBusy) return;
       telemetryBusy = true;
       try {
-        const res = await fetch('/api/telemetry', {cache: 'no-store'});
-        if (!res.ok) throw new Error(`HTTP ${res.status}`);
-        const d = await res.json();
+        const d = await getJson('/api/telemetry');
+        telemetry = d; offline = null; lastOk = new Date();
+        document.body.classList.remove('offline');
         $('conn').className = '';
-        $('conn').textContent = `updated ${new Date(d.now * 1000).toLocaleTimeString()}`;
-        renderBanner(d); renderBeacon(d); renderEsp(d);
+        $('conn').textContent = `updated ${lastOk.toLocaleTimeString()}`;
+        renderAlerts(d); renderBeacon(d); renderEsp(d);
         renderMission(d); renderOdom(d); renderTopics(d); renderEvents(d);
       } catch (err) {
+        offline = err.message;
+        document.body.classList.add('offline');
         $('conn').className = 'error';
         $('conn').textContent = `telemetry error: ${err.message}`;
+        renderAlerts(telemetry);
       } finally { telemetryBusy = false; }
     }
 
@@ -1013,21 +1122,22 @@ PAGE = r"""<!doctype html>
       if (pollBusy) return;
       pollBusy = true;
       try {
-        const res = await fetch(mode === '2d' ? '/api/scan' : '/api/cloud', {cache: 'no-store'});
-        if (!res.ok) throw new Error(`HTTP ${res.status}`);
-        const data = await res.json();
+        const data = await getJson(mode === '2d' ? '/api/scan' : '/api/cloud');
         if (mode === '2d') scan = data.scan;
         else { cloud = data.cloud; scan = data.scan; }
-        const sample = mode === '3d' && cloud && cloud.received_at ? cloud : scan;
-        const age = sample && sample.received_at ? Date.now() / 1000 - sample.received_at : Infinity;
-        $('scanHint').textContent = age === Infinity ? 'no data'
-          : `${sample.frame_id || '?'} · updated ${age < 1 ? (age * 1000).toFixed(0) + ' ms' : age.toFixed(2) + ' s'} ago`;
+        const sample = mode === '3d' && cloud ? cloud : scan;
+        const age = sample ? sample.age : null;
+        $('scanHint').textContent = age == null ? 'no data'
+          : `${sample.frame_id || '?'} · updated ${fmtAge(age)} ago`;
+        scanNote = age == null ? 'waiting for LiDAR data'
+          : age > SCAN_STALE_S ? `LiDAR STALE · last data ${fmtAge(age)} ago` : '';
         $('cloudInfo').textContent = mode === '3d' && cloud && cloud.points && cloud.points.length
           ? `${cloud.points.length} cloud points`
           : mode === '3d' ? 'showing planar LaserScan' : '';
         draw();
       } catch (err) {
         $('scanHint').textContent = `error: ${err.message}`;
+        scanNote = 'LiDAR view frozen · dashboard offline'; draw();
       } finally { pollBusy = false; }
     }
 
@@ -1105,6 +1215,9 @@ def make_handler(node: RobotDashboard):
             self.send_header("X-Content-Type-Options", "nosniff")
             self.end_headers()
             self.wfile.write(body)
+
+        def log_request(self, code="-", size="-") -> None:
+            pass  # the page polls several times a second; only errors are logged
 
         def log_message(self, format: str, *args) -> None:
             node.get_logger().info(format % args)
