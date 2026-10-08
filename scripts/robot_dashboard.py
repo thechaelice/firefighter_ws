@@ -80,6 +80,23 @@ def _format_mac(raw) -> str:
         return ""
 
 
+def _coerce_int(value) -> int | None:
+    """Coerce a ROS integer field to a Python ``int``.
+
+    Some ROS 2 builds expose ``byte`` fields (e.g. ``DiagnosticStatus.level``)
+    as single-byte ``bytes`` objects such as ``b'\\x00'`` rather than ``int``;
+    ``int(b'\\x00')`` raises ``ValueError``.  Accept both representations.
+    """
+    if value is None:
+        return None
+    if isinstance(value, (bytes, bytearray)):
+        return value[0] if value else None
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
 def _yaw_from_quaternion(qx: float, qy: float, qz: float, qw: float) -> float:
     return math.atan2(2.0 * (qw * qz + qx * qy), 1.0 - 2.0 * (qy * qy + qz * qz))
 
@@ -352,20 +369,23 @@ class RobotDashboard(Node):
         with self._lock:
             for entry in msg.status:
                 values = {item.key: item.value for item in entry.values}
+                level = _coerce_int(entry.level)
+                level = 0 if level is None else level
                 previous = self._diagnostics.get(entry.name)
                 self._diagnostics[entry.name] = {
+                    "name": entry.name,
                     "at": time.monotonic(),
-                    "level": int(entry.level),
-                    "level_name": DIAGNOSTIC_LEVELS.get(int(entry.level), f"LEVEL_{entry.level}"),
+                    "level": level,
+                    "level_name": DIAGNOSTIC_LEVELS.get(level, f"LEVEL_{level}"),
                     "message": entry.message,
                     "hardware_id": entry.hardware_id,
                     "values": values,
                 }
-                if previous is None or previous["level"] != int(entry.level):
+                if previous is None or previous["level"] != level:
                     self._log_event(
                         "diagnostics",
-                        "alert" if int(entry.level) >= 2 else ("warn" if int(entry.level) == 1 else "ok"),
-                        f"{entry.name}: {DIAGNOSTIC_LEVELS.get(int(entry.level), entry.level)}",
+                        "alert" if level >= 2 else ("warn" if level == 1 else "ok"),
+                        f"{entry.name}: {DIAGNOSTIC_LEVELS.get(level, level)}",
                     )
 
     def _on_battery(self, msg: BatteryState) -> None:
