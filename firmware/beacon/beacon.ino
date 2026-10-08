@@ -51,7 +51,13 @@ int messageCounter = 0;
 // ============================================================
 // SEND CALLBACK
 // ============================================================
+// ESP-IDF 5.5 (Arduino core 3.3.x) changed the first argument of the
+// send callback from the peer MAC to a wifi_tx_info_t.
+#if defined(ESP_IDF_VERSION) && (ESP_IDF_VERSION >= ESP_IDF_VERSION_VAL(5, 5, 0))
+void OnDataSent(const wifi_tx_info_t *tx_info, esp_now_send_status_t status) {
+#else
 void OnDataSent(const uint8_t *mac_addr, esp_now_send_status_t status) {
+#endif
   Serial.print("Delivery Status: ");
   if (status == ESP_NOW_SEND_SUCCESS) {
     Serial.println("SUCCESS");

@@ -77,7 +77,8 @@ const int UART_RX_PIN = 16;
 const int UART_TX_PIN = 17;
 const long UART_BAUD  = 115200;
 
-HardwareSerial& PI = Serial2;   // the Pi link to the Raspberry Pi
+// (not named PI: Arduino.h #defines PI as 3.14159...)
+HardwareSerial& PiLink = Serial2;   // the UART link to the Raspberry Pi
 
 
 // ============================================================
@@ -129,13 +130,24 @@ const bool M2_ENC_INVERT = false;
 
 
 // ============================================================
-// PWM SETTINGS (ESP32 Arduino Core 2.0.x)
+// PWM SETTINGS (ESP32 Arduino Core 2.0.x and 3.x)
 // ============================================================
 
 const int PWM_CHANNEL_A  = 0;
 const int PWM_CHANNEL_B  = 1;
 const int PWM_FREQ       = 5000;
 const int PWM_RESOLUTION = 8;     // 0..255
+
+// Core 3.x dropped ledcSetup()/ledcAttachPin(); ledcWrite() now takes
+// the PIN instead of the channel. PWM_A / PWM_B are whatever ledcWrite()
+// expects on the core being built against.
+#if ESP_ARDUINO_VERSION_MAJOR >= 3
+  #define PWM_A ENA
+  #define PWM_B ENB
+#else
+  #define PWM_A PWM_CHANNEL_A
+  #define PWM_B PWM_CHANNEL_B
+#endif
 
 // Legacy open-loop speed used by the fallback maneuver (~71%)
 const int MOTOR_SPEED = 180;
@@ -197,6 +209,11 @@ uint16_t hbSeq        = 0;
 // Fallback detection
 volatile int consecutiveDetectionCount = 0;
 
+// Fallback maneuver states. Declared here, before the first function,
+// because the Arduino IDE hoists auto-generated prototypes (including
+// fbEnter(FbState)) to just above the first function in the sketch.
+enum FbState { FB_IDLE, FB_FWD, FB_PAUSE1, FB_RIGHT, FB_PAUSE2, FB_LEFT, FB_DONE };
+
 
 // ============================================================
 // LOW-LEVEL MOTOR CONTROL
@@ -215,13 +232,13 @@ void setMotor(uint8_t motor, int signedSpeed) {
   if (motor == 1) {
     digitalWrite(IN1, signedSpeed >= 0 ? HIGH : LOW);
     digitalWrite(IN2, signedSpeed >= 0 ? LOW  : HIGH);
-    ledcWrite(PWM_CHANNEL_A, mag);
+    ledcWrite(PWM_A, mag);
     motorCmdA = mag;
   } else {
     // Motor 2 is physically mirrored
     digitalWrite(IN3, signedSpeed >= 0 ? LOW  : HIGH);
     digitalWrite(IN4, signedSpeed >= 0 ? HIGH : LOW);
-    ledcWrite(PWM_CHANNEL_B, mag);
+    ledcWrite(PWM_B, mag);
     motorCmdB = mag;
   }
 }
@@ -231,8 +248,8 @@ void stopMotors() {
   digitalWrite(IN2, LOW);
   digitalWrite(IN3, LOW);
   digitalWrite(IN4, LOW);
-  ledcWrite(PWM_CHANNEL_A, 0);
-  ledcWrite(PWM_CHANNEL_B, 0);
+  ledcWrite(PWM_A, 0);
+  ledcWrite(PWM_B, 0);
   motorCmdA = 0;
   motorCmdB = 0;
 }
@@ -288,7 +305,7 @@ void readEncoderCounts(long& t1, long& t2) {
 void sendFrame(uint8_t msgId, const uint8_t* payload, uint8_t len) {
   uint8_t buf[ff::MAX_PAYLOAD + 6];
   uint16_t n = ff::encodeFrame(buf, msgId, payload, len);
-  PI.write(buf, n);
+  PiLink.write(buf, n);
 }
 
 void sendAck(uint8_t ackedId) {
@@ -344,7 +361,7 @@ void notePiFrame() {
   lastPiFrameMs = millis();
   if (linkFault) {
     linkFault = false;
-    DBG("[link] Pi frames resumed\n");
+    DBG.printf("[link] Pi frames resumed\n");
   }
 }
 
@@ -360,7 +377,7 @@ void updateWatchdog() {
     if (!linkFault) {
       linkFault = true;
       stopMotors();
-      DBG("[link] watchdog timeout -> MOTORS STOPPED\n");
+      DBG.printf("[link] watchdog timeout -> MOTORS STOPPED\n");
     }
     return;
   }
@@ -396,7 +413,7 @@ void handleFrame(const ff::Frame& f) {
       estop = true;
       stopMotors();
       notePiFrame();
-      DBG("[cmd] ESTOP latched\n");
+      DBG.printf("[cmd] ESTOP latched\n");
       sendAck(f.msgId);
       break;
 
@@ -404,7 +421,7 @@ void handleFrame(const ff::Frame& f) {
       estop     = false;
       linkFault = false;
       notePiFrame();
-      DBG("[cmd] faults cleared\n");
+      DBG.printf("[cmd] faults cleared\n");
       sendAck(f.msgId);
       break;
 
@@ -425,7 +442,7 @@ void handleFrame(const ff::Frame& f) {
 // millis() state machine so the UART is serviced continuously.
 // ============================================================
 
-enum FbState { FB_IDLE, FB_FWD, FB_PAUSE1, FB_RIGHT, FB_PAUSE2, FB_LEFT, FB_DONE };
+// (enum FbState is declared in the STATE section, above the first function)
 
 FbState  fbState      = FB_IDLE;
 uint32_t fbStateStart = 0;
@@ -435,12 +452,12 @@ void fbEnter(FbState s) {
   fbStateStart = millis();
 
   switch (s) {
-    case FB_FWD:    DBG("[fb] FORWARD\n"); moveForward(); break;
-    case FB_PAUSE1: DBG("[fb] PAUSE\n");   stopMotors();  break;
-    case FB_RIGHT:  DBG("[fb] RIGHT\n");   turnRight();   break;
-    case FB_PAUSE2: DBG("[fb] PAUSE\n");   stopMotors();  break;
-    case FB_LEFT:   DBG("[fb] LEFT\n");    turnLeft();    break;
-    case FB_DONE:   DBG("[fb] DONE\n");    stopMotors();  break;
+    case FB_FWD:    DBG.printf("[fb] FORWARD\n"); moveForward(); break;
+    case FB_PAUSE1: DBG.printf("[fb] PAUSE\n");   stopMotors();  break;
+    case FB_RIGHT:  DBG.printf("[fb] RIGHT\n");   turnRight();   break;
+    case FB_PAUSE2: DBG.printf("[fb] PAUSE\n");   stopMotors();  break;
+    case FB_LEFT:   DBG.printf("[fb] LEFT\n");    turnLeft();    break;
+    case FB_DONE:   DBG.printf("[fb] DONE\n");    stopMotors();  break;
     case FB_IDLE:   break;
   }
 }
@@ -463,7 +480,7 @@ void fallbackUpdate() {
       incomingData.fireDetected  = false;
       incomingData.smokeDetected = false;
       fbState = FB_IDLE;
-      DBG("[fb] listening for new FIRE+SMOKE\n");
+      DBG.printf("[fb] listening for new FIRE+SMOKE\n");
       break;
     default:
       break;
@@ -503,7 +520,7 @@ void OnDataRecv(const esp_now_recv_info_t *info, const uint8_t *incomingDataByte
   // 1) Gateway: forward to the Pi with RSSI
   sendBeaconEvent(incomingData, rssiMag, mac_addr);
 
-  DBG("[espnow] #%d FIRE=%d SMOKE=%d RSSI=-%d dBm\n",
+  DBG.printf("[espnow] #%d FIRE=%d SMOKE=%d RSSI=-%d dBm\n",
       incomingData.messageNumber,
       incomingData.fireDetected  ? 1 : 0,
       incomingData.smokeDetected ? 1 : 0,
@@ -535,7 +552,7 @@ void OnDataRecv(const uint8_t* mac_addr, const uint8_t* incomingDataBytes, int l
   // 1) Gateway: forward to the Pi with RSSI
   sendBeaconEvent(incomingData, rssiMag, mac_addr);
 
-  DBG("[espnow] #%d FIRE=%d SMOKE=%d RSSI=-%d dBm\n",
+  DBG.printf("[espnow] #%d FIRE=%d SMOKE=%d RSSI=-%d dBm\n",
       incomingData.messageNumber,
       incomingData.fireDetected  ? 1 : 0,
       incomingData.smokeDetected ? 1 : 0,
@@ -590,16 +607,21 @@ void setup() {
   attachInterrupt(digitalPinToInterrupt(M2_ENC_B), motor2ISR, CHANGE);
 
   // ---- PWM -----------------------------------------------
+#if ESP_ARDUINO_VERSION_MAJOR >= 3
+  ledcAttachChannel(ENA, PWM_FREQ, PWM_RESOLUTION, PWM_CHANNEL_A);
+  ledcAttachChannel(ENB, PWM_FREQ, PWM_RESOLUTION, PWM_CHANNEL_B);
+#else
   ledcSetup(PWM_CHANNEL_A, PWM_FREQ, PWM_RESOLUTION);
   ledcSetup(PWM_CHANNEL_B, PWM_FREQ, PWM_RESOLUTION);
   ledcAttachPin(ENA, PWM_CHANNEL_A);
   ledcAttachPin(ENB, PWM_CHANNEL_B);
+#endif
 
   // Safety: motors off at startup
   stopMotors();
 
   // ---- UART link to the Pi -------------------------------
-  PI.begin(UART_BAUD, SERIAL_8N1, UART_RX_PIN, UART_TX_PIN);
+  PiLink.begin(UART_BAUD, SERIAL_8N1, UART_RX_PIN, UART_TX_PIN);
   lastPiFrameMs = millis();
 
   DBG.printf("UART2 to Pi: RX=%d TX=%d @ %ld\n", UART_RX_PIN, UART_TX_PIN, UART_BAUD);
@@ -643,8 +665,8 @@ void setup() {
 
 void loop() {
   // ---- 1. Service the Pi UART (highest priority) ----------
-  while (PI.available()) {
-    if (parser.feed((uint8_t)PI.read(), frame)) {
+  while (PiLink.available()) {
+    if (parser.feed((uint8_t)PiLink.read(), frame)) {
       handleFrame(frame);
     }
   }
