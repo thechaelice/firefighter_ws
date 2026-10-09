@@ -12,9 +12,10 @@ Brings the robot up in dependency order::
                firefighter_mission                  -> behaviour FSM
     operator   rviz2
 
-``hardware:=false`` skips the three nodes that talk to real devices (sllidar, the
-ESP32 bridge and the thermal reader); ``sim.launch.py`` uses it and lets Gazebo
-supply ``/scan``, ``/wheel_odom`` and ``/joint_states`` instead.
+``hardware:=false`` skips the nodes that talk to real devices (sllidar and the
+ESP32 bridge); ``sim.launch.py`` uses it and lets Gazebo supply ``/scan``,
+``/wheel_odom`` and ``/joint_states`` instead. Thermal perception always runs -
+in simulation ``thermal_reader_path`` points it at a simulated frame source.
 
 The top-level ``config/`` and ``maps/`` directories live in the workspace, not in
 any package's share directory, so they are located through the ``FIREFIGHTER_WS``
@@ -108,7 +109,6 @@ def generate_launch_description():
     perception = _include(
         "firefighter_perception", "perception.launch.py",
         {"reader_path": thermal_reader},
-        condition=hardware,
     )
 
     # ---- autonomy --------------------------------------------------------
@@ -193,8 +193,8 @@ def generate_launch_description():
                                               "SLAM/Nav2, so TF and /scan exist."),
             DeclareLaunchArgument("thermal_reader_path", default_value=DEFAULT_THERMAL_READER),
             DeclareLaunchArgument("hardware", default_value="true",
-                                  description="false = no LiDAR / ESP32 bridge / "
-                                              "thermal reader (simulation)."),
+                                  description="false = no LiDAR / ESP32 bridge "
+                                              "(simulation)."),
             DeclareLaunchArgument("model", default_value=DEFAULT_MODEL,
                                   description="Robot XACRO published on "
                                               "/robot_description."),

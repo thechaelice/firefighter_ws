@@ -55,7 +55,7 @@ map ──(slam_toolbox)──> odom ──(robot_localization EKF)──> base_
 | `rviz` | `true` | |
 | `startup_delay` | `3.0` | wait before SLAM/Nav2 so TF and `/scan` exist |
 | `thermal_reader_path` | `$FIREFIGHTER_WS/scripts/thermal/mlx90641_frames` | MLX90641 reader |
-| `hardware` | `true` | `false` skips the LiDAR, ESP32 bridge and thermal reader (simulation) |
+| `hardware` | `true` | `false` skips the LiDAR and ESP32 bridge (simulation) |
 | `model` | `firefighter_description/urdf/firefighter.urdf.xacro` | XACRO published on `/robot_description` |
 
 `FIREFIGHTER_WS` defaults to `~/firefighter_ws`; set it if the workspace moves.
@@ -90,8 +90,11 @@ ros2 launch firefighter_description description.launch.py
 rviz2 -d $(ros2 pkg prefix firefighter_bringup)/share/firefighter_bringup/rviz/firefighter.rviz
 ```
 
-There is no simulated thermal camera, so the mission FSM never sees a
-`/flame_event` in simulation.
+The thermal camera is simulated too: a 16×12 Gazebo thermal sensor publishes
+`/thermal/raw`, and `firefighter_perception`'s `sim_thermal_frames` feeds it to the
+unmodified perception node in place of the MLX90641 reader. The fire in the east
+room reads about 326 °C against a 15 °C background, so `/flame_event` fires when
+the robot faces it.
 
 ## Mapping then localizing
 

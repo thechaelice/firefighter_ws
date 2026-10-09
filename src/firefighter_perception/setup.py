@@ -25,6 +25,7 @@ setup(
     entry_points={
         "console_scripts": [
             "thermal_node = firefighter_perception.thermal_node:main",
+            "sim_thermal_frames = firefighter_perception.sim_thermal_frames:main",
         ],
     },
 )

@@ -139,7 +139,7 @@ with **Fixed Frame** `map`; until SLAM starts publishing `map`, switch it to `od
 | RPLIDAR A1 → `/scan` | Gazebo `gpu_lidar` → `/scan` |
 | ESP32 bridge → `/wheel_odom`, takes `/cmd_vel` | Gazebo diff-drive → `/wheel_odom`, takes `/cmd_vel` |
 | — | Gazebo → `/joint_states` (wheels turn in RViz) |
-| MLX90641 → `/thermal/image`, `/flame_event` | **not simulated** — the mission never sees a flame |
+| MLX90641 reader → `/thermal/image`, `/flame_event` | Gazebo thermal camera → `/thermal/raw` → the same perception node |
 | ESP-NOW beacons → `/beacon_event` | **not simulated** |
 
 ### 7. View the model only (no Gazebo)
@@ -405,6 +405,8 @@ list` on the PC shows nothing from the Pi while `ping <pi-ip>` works, that is wh
 | Robot appears without meshes | `GZ_SIM_RESOURCE_PATH` was overridden; launch through `sim.launch.py`, which sets it. |
 | RViz shows "No transform from [laser] to [map]" for the first seconds | Normal — SLAM and Nav2 start `startup_delay` seconds (8 by default) after Gazebo. Raise it on a slow machine: `startup_delay:=15.0`. |
 | Robot ignores teleop | Nav2 or the mission node is also publishing `/cmd_vel`. Launch with `nav2_enabled:=false`. |
+| `no thermal frames for 5.x s` once at startup | Harmless — the simulated frame source takes a few seconds to connect. It is only a problem if `/thermal/image` never appears. |
+| Thermal image is uniformly cold | The fire is not in view: the camera has a 55° lens and looks straight ahead. Drive into the east room and face the orange cylinder. |
 | Everything is frozen at t=0 | `/clock` is not bridged — check `ros2 topic hz /clock`. |
 
 ### Robot

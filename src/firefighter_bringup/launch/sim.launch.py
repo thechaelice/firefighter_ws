@@ -4,16 +4,21 @@ Gazebo stands in for the hardware and publishes the same topics it does::
 
     gz DiffDrive            /cmd_vel -> wheels, -> /wheel_odom   (the ESP32 bridge)
     gz gpu_lidar            -> /scan                             (the RPLIDAR)
+    gz thermal camera       -> /thermal/raw                      (the MLX90641)
     gz JointStatePublisher  -> /joint_states
 
 Everything above the hardware - rf2o, the EKF, SLAM Toolbox, Nav2, the mission
 FSM and RViz - is the unmodified ``bringup.launch.py`` with ``hardware:=false``,
 so its arguments (``slam``, ``nav2_enabled``, ``rviz``, ...) work here too.
-There is no simulated thermal camera, so nothing publishes ``/flame_event``.
+
+Thermal perception is the real node as well: it is pointed at
+``sim_thermal_frames`` instead of the MLX90641 reader, which prints the Gazebo
+camera's frames in the reader's format, so ``/thermal/image`` and
+``/flame_event`` come out of the same detection code as on the robot.
 """
 import os
 
-from ament_index_python.packages import get_package_share_directory
+from ament_index_python.packages import get_package_prefix, get_package_share_directory
 from launch import LaunchDescription
 from launch.actions import (
     DeclareLaunchArgument,
@@ -69,6 +74,7 @@ def generate_launch_description():
             "/wheel_odom@nav_msgs/msg/Odometry[gz.msgs.Odometry",
             "/scan@sensor_msgs/msg/LaserScan[gz.msgs.LaserScan",
             "/joint_states@sensor_msgs/msg/JointState[gz.msgs.Model",
+            "/thermal/raw@sensor_msgs/msg/Image[gz.msgs.Image",
         ],
         output="screen",
     )
@@ -81,6 +87,10 @@ def generate_launch_description():
             "hardware": "false",
             "use_sim_time": "true",
             "model": os.path.join(description_share, "urdf", "firefighter.gazebo.xacro"),
+            "thermal_reader_path": os.path.join(
+                get_package_prefix("firefighter_perception"),
+                "lib", "firefighter_perception", "sim_thermal_frames",
+            ),
             "startup_delay": LaunchConfiguration("startup_delay"),
         }.items(),
     )
