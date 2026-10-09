@@ -26,6 +26,7 @@ from launch.actions import (
     IncludeLaunchDescription,
     SetEnvironmentVariable,
 )
+from launch.conditions import IfCondition, UnlessCondition
 from launch.launch_description_sources import PythonLaunchDescriptionSource
 from launch.substitutions import EnvironmentVariable, LaunchConfiguration
 from launch_ros.actions import Node
@@ -49,6 +50,13 @@ def generate_launch_description():
     gz_sim = ExecuteProcess(
         cmd=["gz", "sim", "-r", LaunchConfiguration("world")],
         output="screen",
+        condition=IfCondition(LaunchConfiguration("gui")),
+    )
+    # Server only: RViz is the view, and the Gazebo window costs about a CPU core.
+    gz_server = ExecuteProcess(
+        cmd=["gz", "sim", "-s", "-r", LaunchConfiguration("world")],
+        output="screen",
+        condition=UnlessCondition(LaunchConfiguration("gui")),
     )
 
     spawn_robot = Node(
@@ -99,6 +107,9 @@ def generate_launch_description():
         [
             DeclareLaunchArgument("world", default_value=default_world,
                                   description="Gazebo world (SDF) to load."),
+            DeclareLaunchArgument("gui", default_value="true",
+                                  description="false = no Gazebo window "
+                                              "(server only); lighter on the CPU."),
             DeclareLaunchArgument("x", default_value="0.0"),
             DeclareLaunchArgument("y", default_value="0.0"),
             DeclareLaunchArgument("yaw", default_value="0.0"),
@@ -107,6 +118,7 @@ def generate_launch_description():
                                               "Gazebo needs longer than the robot."),
             resource_path,
             gz_sim,
+            gz_server,
             spawn_robot,
             bridge,
             stack,

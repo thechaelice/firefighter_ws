@@ -16,8 +16,10 @@
 -->
 <sdf version="1.9">
   <world name="firehouse">
-    <physics name="1ms" type="ignored">
-      <max_step_size>0.001</max_step_size>
+    <!-- 4 ms steps. With 1 ms steps and the full Nav2 stack running, a 12-core PC
+         could only simulate at 0.3x real time, which slows every sensor to match. -->
+    <physics name="4ms" type="ignored">
+      <max_step_size>0.004</max_step_size>
       <real_time_factor>1.0</real_time_factor>
     </physics>
 

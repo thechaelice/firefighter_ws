@@ -120,6 +120,7 @@ real robot runs — `rf2o`, the EKF, SLAM Toolbox, Nav2, the mission FSM — plu
 |---|---|
 | Mapping only (no Nav2) | `ros2 launch firefighter_bringup sim.launch.py nav2_enabled:=false` |
 | No RViz | `ros2 launch firefighter_bringup sim.launch.py rviz:=false` |
+| No Gazebo window (lighter; RViz is the view) | `ros2 launch firefighter_bringup sim.launch.py gui:=false` |
 | Different spawn pose | `ros2 launch firefighter_bringup sim.launch.py x:=2.5 y:=0.5 yaw:=1.57` |
 | Different world | `ros2 launch firefighter_bringup sim.launch.py world:=/path/to/world.sdf` |
 
@@ -401,6 +402,7 @@ list` on the PC shows nothing from the Pi while `ping <pi-ip>` works, that is wh
 | Symptom | Fix |
 |---|---|
 | Gazebo is very slow | Software rendering — follow Simulation §9. |
+| `/scan` is well under 8 Hz, map appears late | The PC cannot simulate in real time, and sensor rates follow simulation time. Check `gz topic -e -n 1 -t /stats` (`real_time_factor` should be near 1). Launch with `gui:=false`, or `nav2_enabled:=false` while mapping, and close other heavy programs. |
 | Gazebo window opens but the robot is missing | Check the launch terminal for a `create` error; the robot is spawned from `/robot_description`, so `robot_state_publisher` must be up. |
 | Robot appears without meshes | `GZ_SIM_RESOURCE_PATH` was overridden; launch through `sim.launch.py`, which sets it. |
 | RViz shows "No transform from [laser] to [map]" for the first seconds | Normal — SLAM and Nav2 start `startup_delay` seconds (8 by default) after Gazebo. Raise it on a slow machine: `startup_delay:=15.0`. |
