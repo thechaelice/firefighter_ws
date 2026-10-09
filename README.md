@@ -88,7 +88,8 @@ The following packages are included in `src/`:
 
 ### 1. Build the Workspace
 
-Ensure ROS 2 (Jazzy) is installed and sourced.
+Ensure ROS 2 (Jazzy) is installed and sourced. For a from-scratch install - the
+Pi, or Gazebo simulation on a PC under WSL2 - follow [`setup.md`](setup.md).
 
 > [!WARNING]
 > On this Raspberry Pi 4, do **not** run a bare `colcon build --symlink-install`.

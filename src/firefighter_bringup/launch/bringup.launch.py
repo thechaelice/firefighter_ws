@@ -2,6 +2,7 @@
 
 Brings the robot up in dependency order::
 
+    model      firefighter_description              -> /robot_description, base_link -> laser
     sensing    sllidar                              -> /scan
     odometry   rf2o  +  robot_localization EKF      -> /odom_rf2o, odom -> base_link
     robot      firefighter_bridge (ESP32 UART)      -> /wheel_odom, /beacon_event
@@ -11,13 +12,17 @@ Brings the robot up in dependency order::
                firefighter_mission                  -> behaviour FSM
     operator   rviz2
 
+``hardware:=false`` skips the three nodes that talk to real devices (sllidar, the
+ESP32 bridge and the thermal reader); ``sim.launch.py`` uses it and lets Gazebo
+supply ``/scan``, ``/wheel_odom`` and ``/joint_states`` instead.
+
 The top-level ``config/`` and ``maps/`` directories live in the workspace, not in
 any package's share directory, so they are located through the ``FIREFIGHTER_WS``
 environment variable (default ``~/firefighter_ws``). Set it if the workspace moves.
 """
 import os
 from pathlib import Path
-from typing import Dict, List
+from typing import Dict
 
 from ament_index_python.packages import get_package_share_directory
 from launch import LaunchDescription
@@ -31,45 +36,20 @@ WORKSPACE = Path(os.environ.get("FIREFIGHTER_WS", "~/firefighter_ws")).expanduse
 DEFAULT_CONFIG_DIR = str(WORKSPACE / "config")
 DEFAULT_MAP = str(WORKSPACE / "maps" / "map.yaml")
 DEFAULT_THERMAL_READER = str(WORKSPACE / "scripts" / "thermal" / "mlx90641_frames")
+DEFAULT_MODEL = os.path.join(
+    get_package_share_directory("firefighter_description"),
+    "urdf", "firefighter.urdf.xacro",
+)
 
 
-def _include(package: str, launch_file: str, arguments: Dict[str, object]):
+def _include(package: str, launch_file: str, arguments: Dict[str, object],
+             condition=None):
     path = os.path.join(get_package_share_directory(package), "launch", launch_file)
     return IncludeLaunchDescription(
         PythonLaunchDescriptionSource(path),
         launch_arguments=arguments.items(),
+        condition=condition,
     )
-
-
-def _mount_transform(child_frame: str, defaults: Dict[str, str]) -> List:
-    """Static ``base_link -> <child_frame>`` transform, offset via launch args.
-
-    These offsets are the physical sensor mounts. The defaults are placeholders -
-    measure the robot and correct them, or override per launch.
-    """
-    declares = [
-        DeclareLaunchArgument(
-            f"{child_frame}_{axis}", default_value=value,
-            description=f"{child_frame} mount {axis}",
-        )
-        for axis, value in defaults.items()
-    ]
-    node = Node(
-        package="tf2_ros",
-        executable="static_transform_publisher",
-        name=f"base_link_to_{child_frame}",
-        arguments=[
-            "--x", LaunchConfiguration(f"{child_frame}_x"),
-            "--y", LaunchConfiguration(f"{child_frame}_y"),
-            "--z", LaunchConfiguration(f"{child_frame}_z"),
-            "--yaw", LaunchConfiguration(f"{child_frame}_yaw"),
-            "--pitch", "0.0",
-            "--roll", "0.0",
-            "--frame-id", "base_link",
-            "--child-frame-id", child_frame,
-        ],
-    )
-    return declares + [node]
 
 
 def generate_launch_description():
@@ -80,14 +60,28 @@ def generate_launch_description():
     thermal_reader = LaunchConfiguration("thermal_reader_path")
     map_file = LaunchConfiguration("map")
     startup_delay = LaunchConfiguration("startup_delay")
+    hardware = IfCondition(LaunchConfiguration("hardware"))
 
     def cfg(name: str):
         return PathJoinSubstitution([config_dir, name])
+
+    # ---- model -----------------------------------------------------------
+    # robot_state_publisher owns the sensor mounts (base_link -> laser,
+    # base_link -> thermal_camera); they come from the URDF, not launch args.
+    description = _include(
+        "firefighter_description", "description.launch.py",
+        {
+            "use_sim_time": use_sim_time,
+            "model": LaunchConfiguration("model"),
+            "publish_joint_states": LaunchConfiguration("hardware"),
+        },
+    )
 
     # ---- sensing ---------------------------------------------------------
     lidar = _include(
         "sllidar_ros2", "sllidar_a1_launch.py",
         {"serial_port": serial_port, "use_sim_time": use_sim_time},
+        condition=hardware,
     )
 
     # ---- odometry --------------------------------------------------------
@@ -96,7 +90,7 @@ def generate_launch_description():
         executable="rf2o_laser_odometry_node",
         name="rf2o_laser_odometry",
         output="screen",
-        parameters=[cfg("rf2o.yaml")],
+        parameters=[cfg("rf2o.yaml"), {"use_sim_time": use_sim_time}],
     )
     ekf = Node(
         package="robot_localization",
@@ -107,10 +101,14 @@ def generate_launch_description():
     )
 
     # ---- robot -----------------------------------------------------------
-    bridge = _include("firefighter_bridge", "bridge.launch.py", {"port": bridge_port})
+    bridge = _include(
+        "firefighter_bridge", "bridge.launch.py", {"port": bridge_port},
+        condition=hardware,
+    )
     perception = _include(
         "firefighter_perception", "perception.launch.py",
         {"reader_path": thermal_reader},
+        condition=hardware,
     )
 
     # ---- autonomy --------------------------------------------------------
@@ -166,6 +164,7 @@ def generate_launch_description():
         executable="rviz2",
         name="rviz2",
         output="screen",
+        parameters=[{"use_sim_time": use_sim_time}],
         arguments=[
             "-d",
             os.path.join(get_package_share_directory("firefighter_bringup"),
@@ -193,9 +192,13 @@ def generate_launch_description():
                                   description="Seconds to wait before starting "
                                               "SLAM/Nav2, so TF and /scan exist."),
             DeclareLaunchArgument("thermal_reader_path", default_value=DEFAULT_THERMAL_READER),
-            *_mount_transform("laser", {"x": "0.0", "y": "0.0", "z": "0.12", "yaw": "0.0"}),
-            *_mount_transform("thermal_camera",
-                              {"x": "0.05", "y": "0.0", "z": "0.15", "yaw": "0.0"}),
+            DeclareLaunchArgument("hardware", default_value="true",
+                                  description="false = no LiDAR / ESP32 bridge / "
+                                              "thermal reader (simulation)."),
+            DeclareLaunchArgument("model", default_value=DEFAULT_MODEL,
+                                  description="Robot XACRO published on "
+                                              "/robot_description."),
+            description,
             lidar,
             rf2o,
             ekf,

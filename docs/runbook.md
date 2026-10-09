@@ -239,7 +239,9 @@ cd ~/firefighter_ws && ./build.sh && source install/setup.bash
 ros2 launch firefighter_bringup bringup.launch.py
 ```
 
-That starts the LiDAR, `rf2o`, the `robot_localization` EKF, the ESP32 bridge,
+First-time machine setup (Pi or WSL2 simulation) is in [`setup.md`](../setup.md).
+
+That starts the robot model, the LiDAR, `rf2o`, the `robot_localization` EKF, the ESP32 bridge,
 thermal perception, SLAM Toolbox, Nav2, the mission FSM and RViz. See
 [`src/firefighter_bringup/README.md`](../src/firefighter_bringup/README.md) for the
 full argument list and the TF-ownership diagram.
@@ -261,8 +263,8 @@ Exactly one node publishes each transform. This is the thing that most often goe
 wrong:
 
 ```
-map ──(slam_toolbox)──> odom ──(EKF)──> base_link ──(static)──> laser
-                                                └──(static)──> thermal_camera
+map ──(slam_toolbox)──> odom ──(EKF)──> base_link ──(robot_state_publisher)──> laser
+                                                └──(robot_state_publisher)──> thermal_camera
 ```
 
 `rf2o` and the bridge both publish odometry with `publish_tf: false` precisely so

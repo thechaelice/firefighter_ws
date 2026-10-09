@@ -78,6 +78,15 @@ LINKS = {
                        "thermal_camera_joint", "fixed", None, 0.005),
 }
 
+# Continuous joints still export a <limit>; Gazebo enforces it. The drive wheels
+# get roughly the gear motors' no-load speed (~190 rpm) and stall torque.
+JOINT_LIMITS = {                    # joint: (effort N*m, velocity rad/s)
+    "left_wheel_joint": (0.5, 20.0),
+    "right_wheel_joint": (0.5, 20.0),
+    "caster_swivel_joint": (1.0, 100.0),
+    "caster_wheel_joint": (1.0, 100.0),
+}
+
 # name: (rgba, metallic, roughness)
 MATERIALS = {
     "clear_plastic": ((0.80, 0.88, 0.92, 0.45), 0.0, 0.15),
@@ -438,6 +447,8 @@ def create_objects(m, collection):
         props.joint_type = enum_id(props, "joint_type", joint_type)
         if axis:
             props.axis = axis
+        if joint_name in JOINT_LIMITS:
+            props.limit_effort, props.limit_velocity = JOINT_LIMITS[joint_name]
         bpy.context.view_layer.update()
         props.parent_link = links[parent]
         props.child_link = link

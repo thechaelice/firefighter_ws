@@ -11,6 +11,7 @@ ros2 launch firefighter_bringup bringup.launch.py
 
 | Stage | Node | Produces |
 |---|---|---|
+| model | `firefighter_description` (`robot_state_publisher`) | `/robot_description`, **`base_link → laser`**, **`base_link → thermal_camera`** |
 | sensing | `sllidar_ros2` | `/scan` |
 | odometry | `rf2o_laser_odometry` | `/odom_rf2o` |
 | odometry | `robot_localization` `ekf_filter_node` | `/odometry/filtered`, **`odom → base_link`** |
@@ -27,9 +28,13 @@ Exactly one node publishes each transform - this is the thing that most often
 goes wrong:
 
 ```
-map ──(slam_toolbox)──> odom ──(robot_localization EKF)──> base_link ──(static)──> laser
-                                                                    └──(static)──> thermal_camera
+map ──(slam_toolbox)──> odom ──(robot_localization EKF)──> base_link ──(robot_state_publisher)──> laser
+                                                                    └──(robot_state_publisher)──> thermal_camera
 ```
+
+* The sensor mounts come from the URDF in `firefighter_description`
+  (`urdf/firefighter.urdf.xacro`, exported from `model/firefighter.blend`). To move
+  a sensor, change the model and re-export - there are no mount launch arguments.
 
 * `rf2o` has **`publish_tf: false`** (`config/rf2o.yaml`). It feeds `odom → base_link`
   into the EKF, it does not broadcast it.
@@ -50,11 +55,43 @@ map ──(slam_toolbox)──> odom ──(robot_localization EKF)──> base_
 | `rviz` | `true` | |
 | `startup_delay` | `3.0` | wait before SLAM/Nav2 so TF and `/scan` exist |
 | `thermal_reader_path` | `$FIREFIGHTER_WS/scripts/thermal/mlx90641_frames` | MLX90641 reader |
-| `laser_{x,y,z,yaw}` | `0, 0, 0.12, 0` | LiDAR mount |
-| `thermal_camera_{x,y,z,yaw}` | `0.05, 0, 0.15, 0` | thermal mount |
+| `hardware` | `true` | `false` skips the LiDAR, ESP32 bridge and thermal reader (simulation) |
+| `model` | `firefighter_description/urdf/firefighter.urdf.xacro` | XACRO published on `/robot_description` |
 
 `FIREFIGHTER_WS` defaults to `~/firefighter_ws`; set it if the workspace moves.
-The mount offsets are **placeholders** - measure the robot.
+The sensor positions in the model are **estimated from photos** - measure the robot.
+
+## Simulation (Gazebo Harmonic, WSL2)
+
+`sim.launch.py` starts Gazebo with `firefighter_description/worlds/firehouse.sdf`
+(three rooms, obstacles, a fire in the far room), spawns the robot and runs this
+same bringup with `hardware:=false`. Gazebo publishes what the hardware would:
+`/scan`, `/wheel_odom` and `/joint_states`, and drives the wheels from `/cmd_vel`.
+
+One-off setup in WSL2 Ubuntu 24.04 with ROS 2 Jazzy (`ros-jazzy-desktop`,
+`ros-jazzy-ros-gz`), with the workspace cloned to `~/firefighter_ws`:
+
+```bash
+cd ~/firefighter_ws
+rosdep install --from-paths src --ignore-src -r -y   # slam_toolbox, nav2, robot_localization, ...
+JOBS=4 ./build.sh && source install/setup.bash
+```
+
+```bash
+ros2 launch firefighter_bringup sim.launch.py                      # Gazebo + SLAM + Nav2 + RViz
+ros2 launch firefighter_bringup sim.launch.py nav2_enabled:=false  # mapping only
+ros2 run teleop_twist_keyboard teleop_twist_keyboard               # drive it (second terminal)
+```
+
+To look at the model alone in RViz, without Gazebo:
+
+```bash
+ros2 launch firefighter_description description.launch.py
+rviz2 -d $(ros2 pkg prefix firefighter_bringup)/share/firefighter_bringup/rviz/firefighter.rviz
+```
+
+There is no simulated thermal camera, so the mission FSM never sees a
+`/flame_event` in simulation.
 
 ## Mapping then localizing
 

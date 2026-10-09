@@ -24,7 +24,11 @@
   <exec_depend>nav2_bringup</exec_depend>
   <exec_depend>nav2_msgs</exec_depend>
 
+  <exec_depend>ros_gz_sim</exec_depend>
+  <exec_depend>ros_gz_bridge</exec_depend>
+
   <exec_depend>firefighter_interfaces</exec_depend>
+  <exec_depend>firefighter_description</exec_depend>
   <exec_depend>firefighter_bridge</exec_depend>
   <exec_depend>firefighter_perception</exec_depend>
   <exec_depend>firefighter_mission</exec_depend>

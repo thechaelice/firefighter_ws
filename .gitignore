@@ -35,3 +35,6 @@ Thumbs.db
 !/maps/.gitkeep
 
 .vscode/settings.json
+
+# Blender save backups
+*.blend1
