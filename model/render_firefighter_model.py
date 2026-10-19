@@ -2,7 +2,8 @@
 
     blender --background model/firefighter.blend --python model/render_firefighter_model.py
 
-Pass ``-- cycles`` to use Cycles instead of EEVEE.
+Pass ``-- cycles`` to use Cycles instead of EEVEE. Other blend files (e.g. the
+scanner variants) render into ``model/renders/<blend name>/``.
 """
 import sys
 from pathlib import Path
@@ -10,7 +11,7 @@ from pathlib import Path
 import bpy
 from mathutils import Vector
 
-OUT_DIR = Path(__file__).resolve().parent / "renders"
+RENDERS = Path(__file__).resolve().parent / "renders"
 TARGET = Vector((0.07, 0.0, 0.11))
 VIEWS = {
     "front_right": (0.62, -0.50, 0.36),
@@ -22,6 +23,8 @@ VIEWS = {
 
 def main():
     scene = bpy.context.scene
+    stem = Path(bpy.data.filepath).stem
+    out_dir = RENDERS if stem == "firefighter" else RENDERS / stem
     engines = [e.identifier for e in scene.render.bl_rna.properties["engine"].enum_items]
     if "cycles" in sys.argv:
         scene.render.engine = "CYCLES"
@@ -36,7 +39,7 @@ def main():
     for name, location in VIEWS.items():
         camera.location = location
         camera.rotation_euler = (TARGET - camera.location).to_track_quat("-Z", "Y").to_euler()
-        scene.render.filepath = str(OUT_DIR / f"{name}.png")
+        scene.render.filepath = str(out_dir / f"{name}.png")
         bpy.ops.render.render(write_still=True)
         print(f"Rendered {scene.render.filepath}")
 
